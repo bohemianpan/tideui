@@ -142,6 +142,21 @@ function BottomSheetInner({
     }
   }, [isClosing]);
 
+  // For exit: use transitionend on the sheet to detect when slide-out completes
+  useEffect(() => {
+    if (!isClosing) return;
+    const sheet = sheetRef.current;
+    if (!sheet) return;
+    const onDone = (e: TransitionEvent) => {
+      if (e.propertyName !== 'transform') return;
+      sheet.removeEventListener('transitionend', onDone);
+      setMounted(false);
+      setIsClosing(false);
+    };
+    sheet.addEventListener('transitionend', onDone);
+    return () => sheet.removeEventListener('transitionend', onDone);
+  }, [isClosing]);
+
   // -----------------------------------------------------------------------
   // Snap points
   // -----------------------------------------------------------------------
@@ -318,8 +333,7 @@ function BottomSheetInner({
         const lowestSnap = sortedSnaps![0];
         const lowestSnapPx = lowestSnap * vh;
         if (projectedHeight < lowestSnapPx - DISMISS_THRESHOLD) {
-          translateYRef.current = 0;
-          setTranslateY(0);
+          // Keep current translateY so exit transition starts from drag position
           onCloseRef.current();
           return;
         }
@@ -446,7 +460,8 @@ function BottomSheetInner({
     backgroundColor: 'var(--bs-backdrop, rgba(0,0,0,0.4))',
     ...(isClosing
       ? {
-          animation: `tideui-fade-out ${EXIT_DURATION}ms ease-out forwards`,
+          opacity: 0,
+          transition: `opacity ${EXIT_DURATION}ms ease-out`,
         }
       : {
           opacity: backdropOpacity,
@@ -469,7 +484,8 @@ function BottomSheetInner({
     ...sizeStyle,
     ...(isClosing
       ? {
-          animation: `tideui-slide-down ${EXIT_DURATION}ms ease-out forwards`,
+          transform: 'translateY(100%)',
+          transition: `transform ${EXIT_DURATION}ms ease-out`,
         }
       : {
           animation: 'tideui-slide-up 300ms ease-out',
