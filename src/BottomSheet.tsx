@@ -352,25 +352,21 @@ function BottomSheetInner({
           }
         }
 
-        // Calculate translateY to reach target snap from current snap position
-        const targetSnap = sortedSnaps![bestIndex];
-        const targetTranslateY = (currentSnap - targetSnap) * vh;
-
+        // Snap directly: update height to new snap and reset translateY to 0
+        // in one render. Height and transform transition together so the sheet
+        // grows/shrinks into place instead of sliding first and jumping at the end.
         const finalBestIndex = bestIndex;
         setIsSnapping(true);
-        translateYRef.current = targetTranslateY;
-        setTranslateY(targetTranslateY);
+        currentSnapIndexRef.current = finalBestIndex;
+        setCurrentSnapIndex(finalBestIndex);
+        translateYRef.current = 0;
+        setTranslateY(0);
 
-        // After snap transition completes, reset to new snap index with translateY=0
         const sheet = sheetRef.current;
         if (sheet) {
           const onTransitionDone = (e: TransitionEvent) => {
             if (e.propertyName !== 'transform') return;
             sheet.removeEventListener('transitionend', onTransitionDone);
-            currentSnapIndexRef.current = finalBestIndex;
-            setCurrentSnapIndex(finalBestIndex);
-            translateYRef.current = 0;
-            setTranslateY(0);
             setIsSnapping(false);
             onSnapRef.current?.(finalBestIndex, sortedSnaps![finalBestIndex]);
           };
@@ -436,7 +432,7 @@ function BottomSheetInner({
   let transitionStyle = '';
   if (!isDragging && !isClosing) {
     if (isSnapping) {
-      transitionStyle = `transform ${SNAP_SPRING_DURATION}ms ${SNAP_SPRING_EASING}`;
+      transitionStyle = `transform ${SNAP_SPRING_DURATION}ms ${SNAP_SPRING_EASING}, height ${SNAP_SPRING_DURATION}ms ${SNAP_SPRING_EASING}`;
     } else {
       transitionStyle = 'transform 300ms ease-out';
     }

@@ -252,21 +252,17 @@ function BottomSheetInner({
             bestIndex = i;
           }
         }
-        const targetSnap = sortedSnaps[bestIndex];
-        const targetTranslateY = (currentSnap - targetSnap) * vh;
         const finalBestIndex = bestIndex;
         setIsSnapping(true);
-        translateYRef.current = targetTranslateY;
-        setTranslateY(targetTranslateY);
+        currentSnapIndexRef.current = finalBestIndex;
+        setCurrentSnapIndex(finalBestIndex);
+        translateYRef.current = 0;
+        setTranslateY(0);
         const sheet = sheetRef.current;
         if (sheet) {
           const onTransitionDone = (e) => {
             if (e.propertyName !== "transform") return;
             sheet.removeEventListener("transitionend", onTransitionDone);
-            currentSnapIndexRef.current = finalBestIndex;
-            setCurrentSnapIndex(finalBestIndex);
-            translateYRef.current = 0;
-            setTranslateY(0);
             setIsSnapping(false);
             onSnapRef.current?.(finalBestIndex, sortedSnaps[finalBestIndex]);
           };
@@ -308,7 +304,7 @@ function BottomSheetInner({
   let transitionStyle = "";
   if (!isDragging && !isClosing) {
     if (isSnapping) {
-      transitionStyle = `transform ${SNAP_SPRING_DURATION}ms ${SNAP_SPRING_EASING}`;
+      transitionStyle = `transform ${SNAP_SPRING_DURATION}ms ${SNAP_SPRING_EASING}, height ${SNAP_SPRING_DURATION}ms ${SNAP_SPRING_EASING}`;
     } else {
       transitionStyle = "transform 300ms ease-out";
     }
