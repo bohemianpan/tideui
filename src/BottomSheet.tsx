@@ -17,12 +17,13 @@ import {
 // ---------------------------------------------------------------------------
 
 const DISMISS_THRESHOLD = 100;
-const VELOCITY_THRESHOLD = 0.4; // px/ms
+const VELOCITY_THRESHOLD = 0.4; // px/ms (non-snap dismiss)
 const SCROLL_LOCK_TIMEOUT = 300;
 const SNAP_SPRING_EASING = 'cubic-bezier(0.32, 0.72, 0, 1)';
-const SNAP_SPRING_DURATION = 400; // ms
-const MOMENTUM_FACTOR = 200; // multiplied by velocity to project position
+const SNAP_SPRING_DURATION = 300; // ms
 const EXIT_DURATION = 300; // ms
+const FLICK_VELOCITY = 0.3; // px/ms, snap-mode flick threshold
+const DISMISS_OVERSHOOT = 60; // px below lowest snap required to close
 
 // ---------------------------------------------------------------------------
 // Style injection (idempotent)
@@ -113,54 +114,10 @@ function BottomSheetInner({
   defaultSnapPoint = 0,
   onSnap,
 }: BottomSheetProps) {
-  // Inject keyframes on first render
   useEffect(() => { injectStyles(); }, []);
 
   // -----------------------------------------------------------------------
-  // Mount / unmount state machine
-  // -----------------------------------------------------------------------
-  const [mounted, setMounted] = useState(false);
-  const [isClosing, setIsClosing] = useState(false);
-  const [hasEntered, setHasEntered] = useState(false); // entry animation done
-
-  useEffect(() => {
-    if (isOpen) {
-      setMounted(true);
-      setIsClosing(false);
-      setHasEntered(false);
-    } else if (mounted) {
-      // Begin exit animation
-      setIsClosing(true);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen]);
-
-  const handleAnimationEnd = useCallback((e: React.AnimationEvent) => {
-    // Only respond to animations on the sheet itself, not bubbled from children
-    if (e.target !== e.currentTarget) return;
-    if (!isClosing) {
-      // Entry animation finished
-      setHasEntered(true);
-    }
-  }, [isClosing]);
-
-  // For exit: use transitionend on the sheet to detect when slide-out completes
-  useEffect(() => {
-    if (!isClosing) return;
-    const sheet = sheetRef.current;
-    if (!sheet) return;
-    const onDone = (e: TransitionEvent) => {
-      if (e.propertyName !== 'transform') return;
-      sheet.removeEventListener('transitionend', onDone);
-      setMounted(false);
-      setIsClosing(false);
-    };
-    sheet.addEventListener('transitionend', onDone);
-    return () => sheet.removeEventListener('transitionend', onDone);
-  }, [isClosing]);
-
-  // -----------------------------------------------------------------------
-  // Snap points
+  // Snap configuration
   // -----------------------------------------------------------------------
   const hasSnap = snapPointsProp != null && snapPointsProp.length > 0;
   const sortedSnaps = useMemo(
@@ -169,18 +126,82 @@ function BottomSheetInner({
     [hasSnap, ...(snapPointsProp ?? [])],
   );
 
-  // Current snap index for snap-point mode
-  const [currentSnapIndex, setCurrentSnapIndex] = useState(defaultSnapPoint);
-  const currentSnapIndexRef = useRef(defaultSnapPoint);
-
-  // Reset snap index when sheet opens
+  const [viewportHeight, setViewportHeight] = useState(() =>
+    typeof window !== 'undefined' ? window.innerHeight : 800
+  );
   useEffect(() => {
-    if (isOpen && hasSnap) {
-      setCurrentSnapIndex(defaultSnapPoint);
-      currentSnapIndexRef.current = defaultSnapPoint;
+    const update = () => setViewportHeight(window.innerHeight);
+    window.addEventListener('resize', update);
+    return () => window.removeEventListener('resize', update);
+  }, []);
+
+  const snapHeightsPx = useMemo(
+    () => (hasSnap && sortedSnaps ? sortedSnaps.map(f => f * viewportHeight) : null),
+    [hasSnap, sortedSnaps, viewportHeight],
+  );
+
+  // -----------------------------------------------------------------------
+  // Mount / unmount state machine
+  // -----------------------------------------------------------------------
+  const [mounted, setMounted] = useState(false);
+  const [isClosing, setIsClosing] = useState(false);
+  const [hasEntered, setHasEntered] = useState(false);
+
+  useEffect(() => {
+    if (isOpen) {
+      setMounted(true);
+      setIsClosing(false);
+      setHasEntered(false);
+    } else if (mounted) {
+      setIsClosing(true);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
+
+  const handleAnimationEnd = useCallback((e: React.AnimationEvent) => {
+    if (e.target !== e.currentTarget) return;
+    if (!isClosing) setHasEntered(true);
+  }, [isClosing]);
+
+  // Exit transitionend — wait for the property that's actually transitioning
+  useEffect(() => {
+    if (!isClosing) return;
+    const sheet = sheetRef.current;
+    if (!sheet) return;
+    const targetProp = hasSnap ? 'height' : 'transform';
+    const onDone = (e: TransitionEvent) => {
+      if (e.target !== sheet) return;
+      if (e.propertyName !== targetProp) return;
+      sheet.removeEventListener('transitionend', onDone);
+      setMounted(false);
+      setIsClosing(false);
+    };
+    sheet.addEventListener('transitionend', onDone);
+    return () => sheet.removeEventListener('transitionend', onDone);
+  }, [isClosing, hasSnap]);
+
+  // -----------------------------------------------------------------------
+  // Snap-mode state (height in pixels drives everything)
+  // -----------------------------------------------------------------------
+  const [currentSnapIndex, setCurrentSnapIndex] = useState(defaultSnapPoint);
+  const currentSnapIndexRef = useRef(defaultSnapPoint);
+  const [sheetHeightPx, setSheetHeightPx] = useState(0);
+  const sheetHeightPxRef = useRef(0);
+  sheetHeightPxRef.current = sheetHeightPx;
+
+  // Sync height on open and when snap config changes
+  useEffect(() => {
+    if (!hasSnap || !snapHeightsPx) return;
+    if (isOpen) {
+      const idx = Math.max(0, Math.min(defaultSnapPoint, snapHeightsPx.length - 1));
+      currentSnapIndexRef.current = idx;
+      setCurrentSnapIndex(idx);
+      setSheetHeightPx(snapHeightsPx[idx]);
+    } else if (mounted) {
+      setSheetHeightPx(0);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, hasSnap, defaultSnapPoint, viewportHeight]);
 
   // -----------------------------------------------------------------------
   // Drag state
@@ -193,25 +214,27 @@ function BottomSheetInner({
 
   const dragStartY = useRef(0);
   const dragStartTime = useRef(0);
+  const dragStartHeightPx = useRef(0);
   const translateYRef = useRef(0);
   const isDragAllowed = useRef(false);
   const lastScrollTime = useRef(0);
+  const lastFrameY = useRef(0);
+  const lastFrameTime = useRef(0);
+  const frameVelocity = useRef(0); // px/ms, positive = moving up
+
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
   const onSnapRef = useRef(onSnap);
   onSnapRef.current = onSnap;
 
-  // Callback for BottomSheet.Header to register its element
   const setHeaderEl = useCallback((el: HTMLDivElement | null) => {
     headerElRef.current = el;
   }, []);
 
-  // Escape key
+  // Escape
   useEffect(() => {
     if (!mounted || isClosing) return;
-    const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
+    const handleEscape = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
     document.addEventListener('keydown', handleEscape);
     return () => document.removeEventListener('keydown', handleEscape);
   }, [mounted, isClosing, onClose]);
@@ -226,7 +249,7 @@ function BottomSheetInner({
     return () => { document.body.style.overflow = ''; };
   }, [mounted, isClosing]);
 
-  // Reset on open
+  // Reset translate on open (non-snap mode uses translate for enter)
   useEffect(() => {
     if (isOpen) {
       setTranslateY(0);
@@ -237,7 +260,7 @@ function BottomSheetInner({
     }
   }, [isOpen]);
 
-  // Track scroll activity (for scroll-aware swipe)
+  // Track scroll activity for scroll-aware swipe
   useEffect(() => {
     if (swipeTarget !== 'sheet' || !mounted || isClosing) return;
     const sheet = sheetRef.current;
@@ -247,15 +270,11 @@ function BottomSheetInner({
     return () => sheet.removeEventListener('scroll', handleScroll, { capture: true });
   }, [mounted, isClosing, swipeTarget]);
 
-  // Check if dragging should be allowed
   const shouldAllowDrag = useCallback((target: EventTarget | null): boolean => {
     if (translateYRef.current > 0) return true;
     if (swipeTarget === 'header') return true;
-
-    // Scroll lock: prevent drag right after scrolling
     if (Date.now() - lastScrollTime.current < SCROLL_LOCK_TIMEOUT) return false;
 
-    // Check if content is scrolled
     let element = target as HTMLElement | null;
     while (element && element !== sheetRef.current) {
       if (element.scrollHeight > element.clientHeight && element.scrollTop > 0) {
@@ -281,8 +300,13 @@ function BottomSheetInner({
         isDragAllowed.current = false;
         return;
       }
-      dragStartY.current = e.touches[0].clientY;
+      const y = e.touches[0].clientY;
+      dragStartY.current = y;
       dragStartTime.current = Date.now();
+      dragStartHeightPx.current = sheetHeightPxRef.current;
+      lastFrameY.current = y;
+      lastFrameTime.current = Date.now();
+      frameVelocity.current = 0;
       isDragAllowed.current = swipeTarget === 'header' ? true : shouldAllowDrag(e.target);
       setIsDragging(true);
       setIsSnapping(false);
@@ -290,22 +314,24 @@ function BottomSheetInner({
 
     const handleTouchMove = (e: TouchEvent) => {
       if (!isDragAllowed.current) return;
-      const diff = e.touches[0].clientY - dragStartY.current;
+      const y = e.touches[0].clientY;
+      const diff = y - dragStartY.current;
 
-      if (hasSnap) {
-        // In snap mode, allow dragging in both directions (clamped to not go above top snap)
-        const vh = window.innerHeight;
-        const topSnap = sortedSnaps![sortedSnaps!.length - 1];
-        const currentSnap = sortedSnaps![currentSnapIndexRef.current];
-        // translateY = 0 means current snap position. Negative = dragging up, positive = dragging down.
-        // Don't allow dragging above the highest snap point.
-        const maxUpDrag = -(topSnap - currentSnap) * vh;
-        const clampedDiff = Math.max(maxUpDrag, diff);
+      // Update per-frame velocity (for flick detection)
+      const now = Date.now();
+      const dt = now - lastFrameTime.current;
+      if (dt > 0) frameVelocity.current = (lastFrameY.current - y) / dt;
+      lastFrameY.current = y;
+      lastFrameTime.current = now;
+
+      if (hasSnap && snapHeightsPx) {
+        const maxHeight = snapHeightsPx[snapHeightsPx.length - 1];
+        const newHeight = Math.max(0, Math.min(maxHeight, dragStartHeightPx.current - diff));
         e.preventDefault();
-        translateYRef.current = clampedDiff;
-        setTranslateY(clampedDiff);
+        sheetHeightPxRef.current = newHeight;
+        setSheetHeightPx(newHeight);
       } else {
-        // Original behavior: only allow dragging down
+        // Non-snap: only drag down to dismiss
         if (diff <= 0) return;
         if (!isDragAllowed.current && !shouldAllowDrag(e.target)) return;
         isDragAllowed.current = true;
@@ -317,63 +343,64 @@ function BottomSheetInner({
 
     const handleTouchEnd = () => {
       setIsDragging(false);
+      const v = frameVelocity.current; // px/ms, positive = flicking up
 
-      if (hasSnap) {
-        const vh = window.innerHeight;
-        const currentSnap = sortedSnaps![currentSnapIndexRef.current];
-        const currentSheetHeight = currentSnap * vh;
-        const dragDistance = translateYRef.current; // positive = dragged down
-        const duration = Date.now() - dragStartTime.current;
-        const velocity = duration > 0 ? dragDistance / duration : 0; // px/ms, positive = downward
+      if (hasSnap && snapHeightsPx) {
+        const minHeight = snapHeightsPx[0];
+        const currentH = sheetHeightPxRef.current;
 
-        // Actual sheet height after drag
-        const actualHeight = currentSheetHeight - dragDistance;
-        // Project with momentum
-        const projectedHeight = actualHeight - velocity * MOMENTUM_FACTOR;
-
-        // Check dismiss: if projected below screen (very small or negative height)
-        const lowestSnap = sortedSnaps![0];
-        const lowestSnapPx = lowestSnap * vh;
-        if (projectedHeight < lowestSnapPx - DISMISS_THRESHOLD) {
-          // Keep current translateY so exit transition starts from drag position
+        // Close if dragged well below lowest snap, or flicked down at/near it
+        if (currentH < minHeight - DISMISS_THRESHOLD) {
           onCloseRef.current();
+          isDragAllowed.current = false;
+          return;
+        }
+        if (v < -FLICK_VELOCITY && currentH <= minHeight + DISMISS_OVERSHOOT) {
+          onCloseRef.current();
+          isDragAllowed.current = false;
           return;
         }
 
-        // Find nearest snap point to projected height
-        let bestIndex = 0;
-        let bestDist = Infinity;
-        for (let i = 0; i < sortedSnaps!.length; i++) {
-          const snapPx = sortedSnaps![i] * vh;
-          const dist = Math.abs(projectedHeight - snapPx);
-          if (dist < bestDist) {
-            bestDist = dist;
-            bestIndex = i;
+        // Pick target snap
+        let targetIndex: number;
+        if (v > FLICK_VELOCITY) {
+          const idx = snapHeightsPx.findIndex(h => h > currentH + 1);
+          targetIndex = idx === -1 ? snapHeightsPx.length - 1 : idx;
+        } else if (v < -FLICK_VELOCITY) {
+          const reversed = [...snapHeightsPx].reverse();
+          const idx = reversed.findIndex(h => h < currentH - 1);
+          targetIndex = idx === -1 ? 0 : snapHeightsPx.length - 1 - idx;
+        } else {
+          let best = 0;
+          let bestDist = Infinity;
+          for (let i = 0; i < snapHeightsPx.length; i++) {
+            const d = Math.abs(snapHeightsPx[i] - currentH);
+            if (d < bestDist) { bestDist = d; best = i; }
           }
+          targetIndex = best;
         }
 
-        // Snap directly: update height to new snap and reset translateY to 0
-        // in one render. Height and transform transition together so the sheet
-        // grows/shrinks into place instead of sliding first and jumping at the end.
-        const finalBestIndex = bestIndex;
+        const targetHeight = snapHeightsPx[targetIndex];
+        const finalIndex = targetIndex;
         setIsSnapping(true);
-        currentSnapIndexRef.current = finalBestIndex;
-        setCurrentSnapIndex(finalBestIndex);
-        translateYRef.current = 0;
-        setTranslateY(0);
+        currentSnapIndexRef.current = finalIndex;
+        setCurrentSnapIndex(finalIndex);
+        sheetHeightPxRef.current = targetHeight;
+        setSheetHeightPx(targetHeight);
 
         const sheet = sheetRef.current;
         if (sheet) {
           const onTransitionDone = (e: TransitionEvent) => {
-            if (e.propertyName !== 'transform') return;
+            if (e.target !== sheet) return;
+            if (e.propertyName !== 'height') return;
             sheet.removeEventListener('transitionend', onTransitionDone);
             setIsSnapping(false);
-            onSnapRef.current?.(finalBestIndex, sortedSnaps![finalBestIndex]);
+            onSnapRef.current?.(finalIndex, sortedSnaps![finalIndex]);
           };
           sheet.addEventListener('transitionend', onTransitionDone);
         }
       } else {
-        // Original non-snap behavior
+        // Non-snap: drag-down to dismiss
         if (translateYRef.current > 0) {
           const duration = Date.now() - dragStartTime.current;
           const velocity = translateYRef.current / duration;
@@ -400,45 +427,19 @@ function BottomSheetInner({
       target.removeEventListener('touchend', handleTouchEnd);
       target.removeEventListener('touchcancel', handleTouchEnd);
     };
-  }, [mounted, isClosing, swipeTarget, shouldAllowDrag, hasSnap, sortedSnaps]);
+  }, [mounted, isClosing, swipeTarget, shouldAllowDrag, hasSnap, snapHeightsPx, sortedSnaps]);
 
-  // -----------------------------------------------------------------------
-  // Render nothing when not mounted
-  // -----------------------------------------------------------------------
   if (!mounted) return null;
 
   // -----------------------------------------------------------------------
-  // Compute styles
+  // Styles
   // -----------------------------------------------------------------------
   const backdropOpacity = isClosing
-    ? undefined // handled by animation
-    : Math.max(0, 1 - translateY / 300);
+    ? undefined
+    : hasSnap && snapHeightsPx
+      ? Math.min(0.4, (sheetHeightPx / snapHeightsPx[snapHeightsPx.length - 1]) * 0.4)
+      : Math.max(0, 1 - translateY / 300);
 
-  // Sheet height in snap mode
-  let snapHeightStyle: CSSProperties = {};
-  if (hasSnap && !isClosing) {
-    const snapFraction = sortedSnaps![currentSnapIndex];
-    snapHeightStyle = { height: `${snapFraction * 100}vh` };
-  }
-
-  // Non-snap height
-  const sizeStyle: CSSProperties = hasSnap
-    ? snapHeightStyle
-    : height
-      ? heightIsMax ? { maxHeight: height } : { height }
-      : {};
-
-  // Transition for non-dragging states
-  let transitionStyle = '';
-  if (!isDragging && !isClosing) {
-    if (isSnapping) {
-      transitionStyle = `transform ${SNAP_SPRING_DURATION}ms ${SNAP_SPRING_EASING}, height ${SNAP_SPRING_DURATION}ms ${SNAP_SPRING_EASING}`;
-    } else {
-      transitionStyle = 'transform 300ms ease-out';
-    }
-  }
-
-  // Root overlay styles
   const rootStyle: CSSProperties = {
     position: 'fixed',
     top: 0,
@@ -448,26 +449,60 @@ function BottomSheetInner({
     zIndex,
   };
 
-  // Backdrop styles
   const backdropStyle: CSSProperties = {
     position: 'absolute',
     top: 0,
     left: 0,
     right: 0,
     bottom: 0,
-    backgroundColor: 'var(--bs-backdrop, rgba(0,0,0,0.4))',
-    ...(isClosing
+    backgroundColor: hasSnap ? `rgba(0,0,0,${backdropOpacity ?? 0})` : 'var(--bs-backdrop, rgba(0,0,0,0.4))',
+    ...(hasSnap
       ? {
-          opacity: 0,
-          transition: `opacity ${EXIT_DURATION}ms ease-out`,
+          transition: isDragging ? 'none' : `background-color ${SNAP_SPRING_DURATION}ms ease`,
         }
-      : {
-          opacity: backdropOpacity,
-          animation: 'tideui-fade-in 300ms ease-out',
-        }),
+      : isClosing
+        ? { opacity: 0, transition: `opacity ${EXIT_DURATION}ms ease-out` }
+        : { opacity: backdropOpacity, animation: 'tideui-fade-in 300ms ease-out' }),
   };
 
-  // Sheet container styles
+  // Sheet size + transitions differ by mode
+  let sheetSizeAndMotion: CSSProperties;
+  if (hasSnap) {
+    const heightValue = isClosing ? '0px' : `${sheetHeightPx}px`;
+    sheetSizeAndMotion = {
+      height: heightValue,
+      transition: isDragging
+        ? 'none'
+        : isClosing
+          ? `height ${EXIT_DURATION}ms ease-out`
+          : `height ${SNAP_SPRING_DURATION}ms ${SNAP_SPRING_EASING}`,
+      touchAction: 'none',
+    };
+  } else {
+    const nonSnapSize: CSSProperties = height
+      ? heightIsMax ? { maxHeight: height } : { height }
+      : {};
+    let transitionStyle = '';
+    if (!isDragging && !isClosing) {
+      transitionStyle = isSnapping
+        ? `transform ${SNAP_SPRING_DURATION}ms ${SNAP_SPRING_EASING}`
+        : 'transform 300ms ease-out';
+    }
+    sheetSizeAndMotion = {
+      ...nonSnapSize,
+      ...(isClosing
+        ? {
+            transform: 'translateY(100%)',
+            transition: `transform ${EXIT_DURATION}ms ease-out`,
+          }
+        : {
+            ...(hasEntered ? {} : { animation: 'tideui-slide-up 300ms ease-out' }),
+            transform: `translateY(${translateY}px)`,
+            transition: transitionStyle || undefined,
+          }),
+    };
+  }
+
   const sheetStyle: CSSProperties = {
     position: 'absolute',
     left: 0,
@@ -479,27 +514,11 @@ function BottomSheetInner({
     display: 'flex',
     flexDirection: 'column',
     boxShadow: '0 -10px 40px rgba(0,0,0,0.15)',
-    ...sizeStyle,
-    ...(isClosing
-      ? {
-          transform: 'translateY(100%)',
-          transition: `transform ${EXIT_DURATION}ms ease-out`,
-        }
-      : {
-          ...(hasEntered ? {} : { animation: 'tideui-slide-up 300ms ease-out' }),
-          transform: `translateY(${translateY}px)`,
-          transition: transitionStyle || undefined,
-        }),
+    overflow: 'hidden',
+    ...sheetSizeAndMotion,
   };
 
-  // Drag handle wrapper styles
-  const handleWrapperStyle: CSSProperties = {
-    flexShrink: 0,
-    paddingTop: 8,
-    paddingBottom: 4,
-  };
-
-  // Drag handle pill styles
+  const handleWrapperStyle: CSSProperties = { flexShrink: 0, paddingTop: 8, paddingBottom: 4 };
   const handlePillStyle: CSSProperties = {
     width: 36,
     height: 4,
@@ -507,38 +526,23 @@ function BottomSheetInner({
     borderRadius: 9999,
     margin: '0 auto',
   };
-
-  // Safe area padding
-  const safeAreaStyle: CSSProperties = {
-    flexShrink: 0,
-    paddingBottom: 'env(safe-area-inset-bottom, 0px)',
-  };
+  const safeAreaStyle: CSSProperties = { flexShrink: 0, paddingBottom: 'env(safe-area-inset-bottom, 0px)' };
 
   return (
     <div style={rootStyle}>
-      {/* Backdrop */}
-      <div
-        style={backdropStyle}
-        onClick={onClose}
-      />
-
-      {/* Sheet */}
+      <div style={backdropStyle} onClick={onClose} />
       <div
         ref={sheetRef}
         className={className}
         style={sheetStyle}
         onAnimationEnd={handleAnimationEnd}
       >
-        {/* Drag handle */}
         <div style={handleWrapperStyle}>
           <div style={handlePillStyle} />
         </div>
-
         <HeaderRefContext.Provider value={setHeaderEl}>
           {children}
         </HeaderRefContext.Provider>
-
-        {/* Safe area padding */}
         <div style={safeAreaStyle} />
       </div>
     </div>
@@ -581,5 +585,5 @@ function Header({ children, className, style }: {
 // Export
 // ---------------------------------------------------------------------------
 
-const BottomSheet = Object.assign(BottomSheetInner, { Header });
+export const BottomSheet = Object.assign(BottomSheetInner, { Header });
 export default BottomSheet;

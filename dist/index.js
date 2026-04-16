@@ -31,9 +31,10 @@ var DISMISS_THRESHOLD = 100;
 var VELOCITY_THRESHOLD = 0.4;
 var SCROLL_LOCK_TIMEOUT = 300;
 var SNAP_SPRING_EASING = "cubic-bezier(0.32, 0.72, 0, 1)";
-var SNAP_SPRING_DURATION = 400;
-var MOMENTUM_FACTOR = 200;
+var SNAP_SPRING_DURATION = 300;
 var EXIT_DURATION = 300;
+var FLICK_VELOCITY = 0.3;
+var DISMISS_OVERSHOOT = 60;
 var STYLE_ID = "tideui-bottomsheet";
 function injectStyles() {
   if (typeof document === "undefined") return;
@@ -77,6 +78,24 @@ function BottomSheetInner({
   (0, import_react.useEffect)(() => {
     injectStyles();
   }, []);
+  const hasSnap = snapPointsProp != null && snapPointsProp.length > 0;
+  const sortedSnaps = (0, import_react.useMemo)(
+    () => hasSnap ? [...snapPointsProp].sort((a, b) => a - b) : null,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [hasSnap, ...snapPointsProp ?? []]
+  );
+  const [viewportHeight, setViewportHeight] = (0, import_react.useState)(
+    () => typeof window !== "undefined" ? window.innerHeight : 800
+  );
+  (0, import_react.useEffect)(() => {
+    const update = () => setViewportHeight(window.innerHeight);
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
+  const snapHeightsPx = (0, import_react.useMemo)(
+    () => hasSnap && sortedSnaps ? sortedSnaps.map((f) => f * viewportHeight) : null,
+    [hasSnap, sortedSnaps, viewportHeight]
+  );
   const [mounted, setMounted] = (0, import_react.useState)(false);
   const [isClosing, setIsClosing] = (0, import_react.useState)(false);
   const [hasEntered, setHasEntered] = (0, import_react.useState)(false);
@@ -91,37 +110,39 @@ function BottomSheetInner({
   }, [isOpen]);
   const handleAnimationEnd = (0, import_react.useCallback)((e) => {
     if (e.target !== e.currentTarget) return;
-    if (!isClosing) {
-      setHasEntered(true);
-    }
+    if (!isClosing) setHasEntered(true);
   }, [isClosing]);
   (0, import_react.useEffect)(() => {
     if (!isClosing) return;
     const sheet = sheetRef.current;
     if (!sheet) return;
+    const targetProp = hasSnap ? "height" : "transform";
     const onDone = (e) => {
-      if (e.propertyName !== "transform") return;
+      if (e.target !== sheet) return;
+      if (e.propertyName !== targetProp) return;
       sheet.removeEventListener("transitionend", onDone);
       setMounted(false);
       setIsClosing(false);
     };
     sheet.addEventListener("transitionend", onDone);
     return () => sheet.removeEventListener("transitionend", onDone);
-  }, [isClosing]);
-  const hasSnap = snapPointsProp != null && snapPointsProp.length > 0;
-  const sortedSnaps = (0, import_react.useMemo)(
-    () => hasSnap ? [...snapPointsProp].sort((a, b) => a - b) : null,
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [hasSnap, ...snapPointsProp ?? []]
-  );
+  }, [isClosing, hasSnap]);
   const [currentSnapIndex, setCurrentSnapIndex] = (0, import_react.useState)(defaultSnapPoint);
   const currentSnapIndexRef = (0, import_react.useRef)(defaultSnapPoint);
+  const [sheetHeightPx, setSheetHeightPx] = (0, import_react.useState)(0);
+  const sheetHeightPxRef = (0, import_react.useRef)(0);
+  sheetHeightPxRef.current = sheetHeightPx;
   (0, import_react.useEffect)(() => {
-    if (isOpen && hasSnap) {
-      setCurrentSnapIndex(defaultSnapPoint);
-      currentSnapIndexRef.current = defaultSnapPoint;
+    if (!hasSnap || !snapHeightsPx) return;
+    if (isOpen) {
+      const idx = Math.max(0, Math.min(defaultSnapPoint, snapHeightsPx.length - 1));
+      currentSnapIndexRef.current = idx;
+      setCurrentSnapIndex(idx);
+      setSheetHeightPx(snapHeightsPx[idx]);
+    } else if (mounted) {
+      setSheetHeightPx(0);
     }
-  }, [isOpen]);
+  }, [isOpen, hasSnap, defaultSnapPoint, viewportHeight]);
   const [translateY, setTranslateY] = (0, import_react.useState)(0);
   const [isDragging, setIsDragging] = (0, import_react.useState)(false);
   const [isSnapping, setIsSnapping] = (0, import_react.useState)(false);
@@ -129,9 +150,13 @@ function BottomSheetInner({
   const headerElRef = (0, import_react.useRef)(null);
   const dragStartY = (0, import_react.useRef)(0);
   const dragStartTime = (0, import_react.useRef)(0);
+  const dragStartHeightPx = (0, import_react.useRef)(0);
   const translateYRef = (0, import_react.useRef)(0);
   const isDragAllowed = (0, import_react.useRef)(false);
   const lastScrollTime = (0, import_react.useRef)(0);
+  const lastFrameY = (0, import_react.useRef)(0);
+  const lastFrameTime = (0, import_react.useRef)(0);
+  const frameVelocity = (0, import_react.useRef)(0);
   const onCloseRef = (0, import_react.useRef)(onClose);
   onCloseRef.current = onClose;
   const onSnapRef = (0, import_react.useRef)(onSnap);
@@ -198,24 +223,32 @@ function BottomSheetInner({
         isDragAllowed.current = false;
         return;
       }
-      dragStartY.current = e.touches[0].clientY;
+      const y = e.touches[0].clientY;
+      dragStartY.current = y;
       dragStartTime.current = Date.now();
+      dragStartHeightPx.current = sheetHeightPxRef.current;
+      lastFrameY.current = y;
+      lastFrameTime.current = Date.now();
+      frameVelocity.current = 0;
       isDragAllowed.current = swipeTarget === "header" ? true : shouldAllowDrag(e.target);
       setIsDragging(true);
       setIsSnapping(false);
     };
     const handleTouchMove = (e) => {
       if (!isDragAllowed.current) return;
-      const diff = e.touches[0].clientY - dragStartY.current;
-      if (hasSnap) {
-        const vh = window.innerHeight;
-        const topSnap = sortedSnaps[sortedSnaps.length - 1];
-        const currentSnap = sortedSnaps[currentSnapIndexRef.current];
-        const maxUpDrag = -(topSnap - currentSnap) * vh;
-        const clampedDiff = Math.max(maxUpDrag, diff);
+      const y = e.touches[0].clientY;
+      const diff = y - dragStartY.current;
+      const now = Date.now();
+      const dt = now - lastFrameTime.current;
+      if (dt > 0) frameVelocity.current = (lastFrameY.current - y) / dt;
+      lastFrameY.current = y;
+      lastFrameTime.current = now;
+      if (hasSnap && snapHeightsPx) {
+        const maxHeight = snapHeightsPx[snapHeightsPx.length - 1];
+        const newHeight = Math.max(0, Math.min(maxHeight, dragStartHeightPx.current - diff));
         e.preventDefault();
-        translateYRef.current = clampedDiff;
-        setTranslateY(clampedDiff);
+        sheetHeightPxRef.current = newHeight;
+        setSheetHeightPx(newHeight);
       } else {
         if (diff <= 0) return;
         if (!isDragAllowed.current && !shouldAllowDrag(e.target)) return;
@@ -227,44 +260,55 @@ function BottomSheetInner({
     };
     const handleTouchEnd = () => {
       setIsDragging(false);
-      if (hasSnap) {
-        const vh = window.innerHeight;
-        const currentSnap = sortedSnaps[currentSnapIndexRef.current];
-        const currentSheetHeight = currentSnap * vh;
-        const dragDistance = translateYRef.current;
-        const duration = Date.now() - dragStartTime.current;
-        const velocity = duration > 0 ? dragDistance / duration : 0;
-        const actualHeight = currentSheetHeight - dragDistance;
-        const projectedHeight = actualHeight - velocity * MOMENTUM_FACTOR;
-        const lowestSnap = sortedSnaps[0];
-        const lowestSnapPx = lowestSnap * vh;
-        if (projectedHeight < lowestSnapPx - DISMISS_THRESHOLD) {
+      const v = frameVelocity.current;
+      if (hasSnap && snapHeightsPx) {
+        const minHeight = snapHeightsPx[0];
+        const currentH = sheetHeightPxRef.current;
+        if (currentH < minHeight - DISMISS_THRESHOLD) {
           onCloseRef.current();
+          isDragAllowed.current = false;
           return;
         }
-        let bestIndex = 0;
-        let bestDist = Infinity;
-        for (let i = 0; i < sortedSnaps.length; i++) {
-          const snapPx = sortedSnaps[i] * vh;
-          const dist = Math.abs(projectedHeight - snapPx);
-          if (dist < bestDist) {
-            bestDist = dist;
-            bestIndex = i;
-          }
+        if (v < -FLICK_VELOCITY && currentH <= minHeight + DISMISS_OVERSHOOT) {
+          onCloseRef.current();
+          isDragAllowed.current = false;
+          return;
         }
-        const finalBestIndex = bestIndex;
+        let targetIndex;
+        if (v > FLICK_VELOCITY) {
+          const idx = snapHeightsPx.findIndex((h) => h > currentH + 1);
+          targetIndex = idx === -1 ? snapHeightsPx.length - 1 : idx;
+        } else if (v < -FLICK_VELOCITY) {
+          const reversed = [...snapHeightsPx].reverse();
+          const idx = reversed.findIndex((h) => h < currentH - 1);
+          targetIndex = idx === -1 ? 0 : snapHeightsPx.length - 1 - idx;
+        } else {
+          let best = 0;
+          let bestDist = Infinity;
+          for (let i = 0; i < snapHeightsPx.length; i++) {
+            const d = Math.abs(snapHeightsPx[i] - currentH);
+            if (d < bestDist) {
+              bestDist = d;
+              best = i;
+            }
+          }
+          targetIndex = best;
+        }
+        const targetHeight = snapHeightsPx[targetIndex];
+        const finalIndex = targetIndex;
         setIsSnapping(true);
-        currentSnapIndexRef.current = finalBestIndex;
-        setCurrentSnapIndex(finalBestIndex);
-        translateYRef.current = 0;
-        setTranslateY(0);
+        currentSnapIndexRef.current = finalIndex;
+        setCurrentSnapIndex(finalIndex);
+        sheetHeightPxRef.current = targetHeight;
+        setSheetHeightPx(targetHeight);
         const sheet = sheetRef.current;
         if (sheet) {
           const onTransitionDone = (e) => {
-            if (e.propertyName !== "transform") return;
+            if (e.target !== sheet) return;
+            if (e.propertyName !== "height") return;
             sheet.removeEventListener("transitionend", onTransitionDone);
             setIsSnapping(false);
-            onSnapRef.current?.(finalBestIndex, sortedSnaps[finalBestIndex]);
+            onSnapRef.current?.(finalIndex, sortedSnaps[finalIndex]);
           };
           sheet.addEventListener("transitionend", onTransitionDone);
         }
@@ -292,23 +336,9 @@ function BottomSheetInner({
       target.removeEventListener("touchend", handleTouchEnd);
       target.removeEventListener("touchcancel", handleTouchEnd);
     };
-  }, [mounted, isClosing, swipeTarget, shouldAllowDrag, hasSnap, sortedSnaps]);
+  }, [mounted, isClosing, swipeTarget, shouldAllowDrag, hasSnap, snapHeightsPx, sortedSnaps]);
   if (!mounted) return null;
-  const backdropOpacity = isClosing ? void 0 : Math.max(0, 1 - translateY / 300);
-  let snapHeightStyle = {};
-  if (hasSnap && !isClosing) {
-    const snapFraction = sortedSnaps[currentSnapIndex];
-    snapHeightStyle = { height: `${snapFraction * 100}vh` };
-  }
-  const sizeStyle = hasSnap ? snapHeightStyle : height ? heightIsMax ? { maxHeight: height } : { height } : {};
-  let transitionStyle = "";
-  if (!isDragging && !isClosing) {
-    if (isSnapping) {
-      transitionStyle = `transform ${SNAP_SPRING_DURATION}ms ${SNAP_SPRING_EASING}, height ${SNAP_SPRING_DURATION}ms ${SNAP_SPRING_EASING}`;
-    } else {
-      transitionStyle = "transform 300ms ease-out";
-    }
-  }
+  const backdropOpacity = isClosing ? void 0 : hasSnap && snapHeightsPx ? Math.min(0.4, sheetHeightPx / snapHeightsPx[snapHeightsPx.length - 1] * 0.4) : Math.max(0, 1 - translateY / 300);
   const rootStyle = {
     position: "fixed",
     top: 0,
@@ -323,15 +353,37 @@ function BottomSheetInner({
     left: 0,
     right: 0,
     bottom: 0,
-    backgroundColor: "var(--bs-backdrop, rgba(0,0,0,0.4))",
-    ...isClosing ? {
-      opacity: 0,
-      transition: `opacity ${EXIT_DURATION}ms ease-out`
-    } : {
-      opacity: backdropOpacity,
-      animation: "tideui-fade-in 300ms ease-out"
-    }
+    backgroundColor: hasSnap ? `rgba(0,0,0,${backdropOpacity ?? 0})` : "var(--bs-backdrop, rgba(0,0,0,0.4))",
+    ...hasSnap ? {
+      transition: isDragging ? "none" : `background-color ${SNAP_SPRING_DURATION}ms ease`
+    } : isClosing ? { opacity: 0, transition: `opacity ${EXIT_DURATION}ms ease-out` } : { opacity: backdropOpacity, animation: "tideui-fade-in 300ms ease-out" }
   };
+  let sheetSizeAndMotion;
+  if (hasSnap) {
+    const heightValue = isClosing ? "0px" : `${sheetHeightPx}px`;
+    sheetSizeAndMotion = {
+      height: heightValue,
+      transition: isDragging ? "none" : isClosing ? `height ${EXIT_DURATION}ms ease-out` : `height ${SNAP_SPRING_DURATION}ms ${SNAP_SPRING_EASING}`,
+      touchAction: "none"
+    };
+  } else {
+    const nonSnapSize = height ? heightIsMax ? { maxHeight: height } : { height } : {};
+    let transitionStyle = "";
+    if (!isDragging && !isClosing) {
+      transitionStyle = isSnapping ? `transform ${SNAP_SPRING_DURATION}ms ${SNAP_SPRING_EASING}` : "transform 300ms ease-out";
+    }
+    sheetSizeAndMotion = {
+      ...nonSnapSize,
+      ...isClosing ? {
+        transform: "translateY(100%)",
+        transition: `transform ${EXIT_DURATION}ms ease-out`
+      } : {
+        ...hasEntered ? {} : { animation: "tideui-slide-up 300ms ease-out" },
+        transform: `translateY(${translateY}px)`,
+        transition: transitionStyle || void 0
+      }
+    };
+  }
   const sheetStyle = {
     position: "absolute",
     left: 0,
@@ -343,21 +395,10 @@ function BottomSheetInner({
     display: "flex",
     flexDirection: "column",
     boxShadow: "0 -10px 40px rgba(0,0,0,0.15)",
-    ...sizeStyle,
-    ...isClosing ? {
-      transform: "translateY(100%)",
-      transition: `transform ${EXIT_DURATION}ms ease-out`
-    } : {
-      ...hasEntered ? {} : { animation: "tideui-slide-up 300ms ease-out" },
-      transform: `translateY(${translateY}px)`,
-      transition: transitionStyle || void 0
-    }
+    overflow: "hidden",
+    ...sheetSizeAndMotion
   };
-  const handleWrapperStyle = {
-    flexShrink: 0,
-    paddingTop: 8,
-    paddingBottom: 4
-  };
+  const handleWrapperStyle = { flexShrink: 0, paddingTop: 8, paddingBottom: 4 };
   const handlePillStyle = {
     width: 36,
     height: 4,
@@ -365,18 +406,9 @@ function BottomSheetInner({
     borderRadius: 9999,
     margin: "0 auto"
   };
-  const safeAreaStyle = {
-    flexShrink: 0,
-    paddingBottom: "env(safe-area-inset-bottom, 0px)"
-  };
+  const safeAreaStyle = { flexShrink: 0, paddingBottom: "env(safe-area-inset-bottom, 0px)" };
   return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { style: rootStyle, children: [
-    /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
-      "div",
-      {
-        style: backdropStyle,
-        onClick: onClose
-      }
-    ),
+    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: backdropStyle, onClick: onClose }),
     /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
       "div",
       {
