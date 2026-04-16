@@ -60,6 +60,9 @@ function BottomSheetInner({
   useEffect(() => {
     injectStyles();
   }, []);
+  useEffect(() => {
+    console.log("[tideui] BottomSheet v0.1.0-snap-rewrite loaded");
+  }, []);
   const hasSnap = snapPointsProp != null && snapPointsProp.length > 0;
   const sortedSnaps = useMemo(
     () => hasSnap ? [...snapPointsProp].sort((a, b) => a - b) : null,
