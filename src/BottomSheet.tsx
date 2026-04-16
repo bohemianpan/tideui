@@ -115,6 +115,11 @@ function BottomSheetInner({
   onSnap,
 }: BottomSheetProps) {
   useEffect(() => { injectStyles(); }, []);
+  useEffect(() => {
+    // Tracer to help confirm which build is loaded in production. Safe to remove later.
+    // eslint-disable-next-line no-console
+    console.log('[tideui] BottomSheet v0.1.0-snap-rewrite loaded');
+  }, []);
 
   // -----------------------------------------------------------------------
   // Snap configuration
