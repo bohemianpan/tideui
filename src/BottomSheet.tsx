@@ -1,7 +1,9 @@
 'use client';
 
 import {
+  forwardRef,
   useEffect,
+  useImperativeHandle,
   useMemo,
   useRef,
   useState,
@@ -97,11 +99,27 @@ export interface BottomSheetProps {
   onSnap?: (index: number, snapValue: number) => void;
 }
 
+/** Imperative handle exposed via `ref`. Obtain by typing your ref as
+ *  `useRef<BottomSheetHandle>(null)` and passing it to `<BottomSheet ref={...} />`. */
+export interface BottomSheetHandle {
+  /** Programmatically move the sheet to a snap index, reusing the same spring
+   *  animation as a drag-release snap.
+   *
+   *  Safely no-ops when the sheet is not mounted, is closing, when `snapPoints`
+   *  was not provided, or when the resolved target already matches the current
+   *  snap. Out-of-range indices are clamped to `[0, snapPoints.length - 1]`.
+   *
+   *  @param index  Target snap index (clamped).
+   *  @param opts   `animate: false` moves instantly without the spring.
+   *                `onSnap` still fires. Default: animated. */
+  snapTo(index: number, opts?: { animate?: boolean }): void;
+}
+
 // ---------------------------------------------------------------------------
 // BottomSheet component
 // ---------------------------------------------------------------------------
 
-function BottomSheetInner({
+const BottomSheetInner = forwardRef<BottomSheetHandle, BottomSheetProps>(function BottomSheetInner({
   isOpen,
   onClose,
   children,
@@ -113,7 +131,7 @@ function BottomSheetInner({
   snapPoints: snapPointsProp,
   defaultSnapPoint = 0,
   onSnap,
-}: BottomSheetProps) {
+}, ref) {
   useEffect(() => { injectStyles(); }, []);
 
   // -----------------------------------------------------------------------
@@ -209,8 +227,13 @@ function BottomSheetInner({
   const [translateY, setTranslateY] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const [isSnapping, setIsSnapping] = useState(false);
+  /** Forces `transition: none` for a single snap change driven by
+   *  `snapTo(..., { animate: false })`. Cleared on the next frame. */
+  const [disableTransition, setDisableTransition] = useState(false);
   const sheetRef = useRef<HTMLDivElement>(null);
   const headerElRef = useRef<HTMLDivElement | null>(null);
+  /** Pill button element used to exclude it from the sheet's drag handler. */
+  const pillButtonRef = useRef<HTMLButtonElement>(null);
 
   const dragStartY = useRef(0);
   const dragStartTime = useRef(0);
@@ -230,6 +253,77 @@ function BottomSheetInner({
   const setHeaderEl = useCallback((el: HTMLDivElement | null) => {
     headerElRef.current = el;
   }, []);
+
+  // -----------------------------------------------------------------------
+  // Shared snap-settle helper
+  //
+  // Attaches a one-shot `transitionend` listener that clears `isSnapping` and
+  // fires `onSnap` exactly once the height transition completes. Used by both
+  // the drag-release path and the imperative `snapTo` path so the two stay in
+  // lockstep (same propertyName gating, same onSnap firing semantics).
+  // -----------------------------------------------------------------------
+  const settleAndFireSnap = useCallback((finalIndex: number) => {
+    const sheet = sheetRef.current;
+    if (!sheet) return;
+    const onTransitionDone = (e: TransitionEvent) => {
+      if (e.target !== sheet) return;
+      if (e.propertyName !== 'height') return;
+      sheet.removeEventListener('transitionend', onTransitionDone);
+      setIsSnapping(false);
+      onSnapRef.current?.(finalIndex, sortedSnaps![finalIndex]);
+    };
+    sheet.addEventListener('transitionend', onTransitionDone);
+  }, [sortedSnaps]);
+
+  // -----------------------------------------------------------------------
+  // Imperative API: ref.current.snapTo(index, opts?)
+  // -----------------------------------------------------------------------
+  useImperativeHandle(ref, () => ({
+    snapTo(index: number, opts?: { animate?: boolean }) {
+      // Safe no-op conditions
+      if (!hasSnap || !snapHeightsPx || !sortedSnaps) return;
+      if (!mounted || isClosing) return;
+
+      const maxIdx = snapHeightsPx.length - 1;
+      const finalIndex = Math.max(0, Math.min(maxIdx, index));
+      const targetHeight = snapHeightsPx[finalIndex];
+
+      // No-op when the target already matches what's on screen to avoid a
+      // zero-delta `transitionend` that would leak `isSnapping=true`.
+      if (
+        finalIndex === currentSnapIndexRef.current &&
+        sheetHeightPxRef.current === targetHeight
+      ) {
+        return;
+      }
+
+      const animate = opts?.animate !== false;
+
+      currentSnapIndexRef.current = finalIndex;
+      setCurrentSnapIndex(finalIndex);
+      sheetHeightPxRef.current = targetHeight;
+
+      if (animate) {
+        setIsSnapping(true);
+        setSheetHeightPx(targetHeight);
+        settleAndFireSnap(finalIndex);
+      } else {
+        // Instant jump: force `transition: none` for this height change, fire
+        // `onSnap` synchronously (no transitionend will arrive), then restore
+        // the transition on the next frame so subsequent snaps animate again.
+        setDisableTransition(true);
+        setSheetHeightPx(targetHeight);
+        onSnapRef.current?.(finalIndex, sortedSnaps[finalIndex]);
+        // Double-rAF ensures the no-transition render has committed before we
+        // flip transitions back on.
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            setDisableTransition(false);
+          });
+        });
+      }
+    },
+  }), [hasSnap, snapHeightsPx, sortedSnaps, mounted, isClosing, settleAndFireSnap]);
 
   // Escape
   useEffect(() => {
@@ -296,6 +390,16 @@ function BottomSheetInner({
     if (!target) return;
 
     const handleTouchStart = (e: TouchEvent) => {
+      // Skip drag init when the touch originates on the pill button so a tap
+      // there stays a tap (and its click handler calls `snapTo(next)`).
+      if (
+        pillButtonRef.current &&
+        e.target instanceof Node &&
+        pillButtonRef.current.contains(e.target)
+      ) {
+        isDragAllowed.current = false;
+        return;
+      }
       if (swipeTarget === 'sheet' && !shouldAllowDrag(e.target)) {
         isDragAllowed.current = false;
         return;
@@ -387,18 +491,7 @@ function BottomSheetInner({
         setCurrentSnapIndex(finalIndex);
         sheetHeightPxRef.current = targetHeight;
         setSheetHeightPx(targetHeight);
-
-        const sheet = sheetRef.current;
-        if (sheet) {
-          const onTransitionDone = (e: TransitionEvent) => {
-            if (e.target !== sheet) return;
-            if (e.propertyName !== 'height') return;
-            sheet.removeEventListener('transitionend', onTransitionDone);
-            setIsSnapping(false);
-            onSnapRef.current?.(finalIndex, sortedSnaps![finalIndex]);
-          };
-          sheet.addEventListener('transitionend', onTransitionDone);
-        }
+        settleAndFireSnap(finalIndex);
       } else {
         // Non-snap: drag-down to dismiss
         if (translateYRef.current > 0) {
@@ -427,7 +520,7 @@ function BottomSheetInner({
       target.removeEventListener('touchend', handleTouchEnd);
       target.removeEventListener('touchcancel', handleTouchEnd);
     };
-  }, [mounted, isClosing, swipeTarget, shouldAllowDrag, hasSnap, snapHeightsPx, sortedSnaps]);
+  }, [mounted, isClosing, swipeTarget, shouldAllowDrag, hasSnap, snapHeightsPx, sortedSnaps, settleAndFireSnap]);
 
   if (!mounted) return null;
 
@@ -471,7 +564,7 @@ function BottomSheetInner({
     const heightValue = isClosing ? '0px' : `${sheetHeightPx}px`;
     sheetSizeAndMotion = {
       height: heightValue,
-      transition: isDragging
+      transition: isDragging || disableTransition
         ? 'none'
         : isClosing
           ? `height ${EXIT_DURATION}ms ease-out`
@@ -526,6 +619,31 @@ function BottomSheetInner({
     borderRadius: 9999,
     margin: '0 auto',
   };
+  // When snap points are configured, render the pill as a real button so a
+  // tap/click advances the sheet to the next snap (and it's keyboard-focusable,
+  // Enter/Space activates). Without snap points there's nothing to snap to, so
+  // we keep the pill as a visual-only `<div>`.
+  const handlePillButtonStyle: CSSProperties = {
+    ...handlePillStyle,
+    display: 'block',
+    border: 'none',
+    padding: 0,
+    background: handlePillStyle.backgroundColor,
+    cursor: 'pointer',
+  };
+  const advanceSnap = () => {
+    if (!hasSnap || !snapHeightsPx) return;
+    const maxIdx = snapHeightsPx.length - 1;
+    const next = Math.min(currentSnapIndexRef.current + 1, maxIdx);
+    if (next === currentSnapIndexRef.current) return; // already at top
+    const targetHeight = snapHeightsPx[next];
+    setIsSnapping(true);
+    currentSnapIndexRef.current = next;
+    setCurrentSnapIndex(next);
+    sheetHeightPxRef.current = targetHeight;
+    setSheetHeightPx(targetHeight);
+    settleAndFireSnap(next);
+  };
   const safeAreaStyle: CSSProperties = { flexShrink: 0, paddingBottom: 'env(safe-area-inset-bottom, 0px)' };
 
   return (
@@ -538,7 +656,17 @@ function BottomSheetInner({
         onAnimationEnd={handleAnimationEnd}
       >
         <div style={handleWrapperStyle}>
-          <div style={handlePillStyle} />
+          {hasSnap ? (
+            <button
+              ref={pillButtonRef}
+              type="button"
+              aria-label="Expand sheet"
+              onClick={advanceSnap}
+              style={handlePillButtonStyle}
+            />
+          ) : (
+            <div style={handlePillStyle} />
+          )}
         </div>
         <HeaderRefContext.Provider value={setHeaderEl}>
           {children}
@@ -547,7 +675,7 @@ function BottomSheetInner({
       </div>
     </div>
   );
-}
+});
 
 // ---------------------------------------------------------------------------
 // BottomSheet.Header compound component
