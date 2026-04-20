@@ -1,5 +1,6 @@
-import * as react_jsx_runtime from 'react/jsx-runtime';
+import * as react from 'react';
 import { ReactNode, CSSProperties } from 'react';
+import * as react_jsx_runtime from 'react/jsx-runtime';
 
 interface BottomSheetProps {
     isOpen: boolean;
@@ -30,15 +31,31 @@ interface BottomSheetProps {
     /** Called when the sheet settles at a snap point. */
     onSnap?: (index: number, snapValue: number) => void;
 }
-declare function BottomSheetInner({ isOpen, onClose, children, height, heightIsMax, swipeTarget, className, zIndex, snapPoints: snapPointsProp, defaultSnapPoint, onSnap, }: BottomSheetProps): react_jsx_runtime.JSX.Element | null;
+/** Imperative handle exposed via `ref`. Obtain by typing your ref as
+ *  `useRef<BottomSheetHandle>(null)` and passing it to `<BottomSheet ref={...} />`. */
+interface BottomSheetHandle {
+    /** Programmatically move the sheet to a snap index, reusing the same spring
+     *  animation as a drag-release snap.
+     *
+     *  Safely no-ops when the sheet is not mounted, is closing, when `snapPoints`
+     *  was not provided, or when the resolved target already matches the current
+     *  snap. Out-of-range indices are clamped to `[0, snapPoints.length - 1]`.
+     *
+     *  @param index  Target snap index (clamped).
+     *  @param opts   `animate: false` moves instantly without the spring.
+     *                `onSnap` still fires. Default: animated. */
+    snapTo(index: number, opts?: {
+        animate?: boolean;
+    }): void;
+}
 /** Wrap your header content in this to make it the drag target when swipeTarget="header" */
 declare function Header({ children, className, style }: {
     children: ReactNode;
     className?: string;
     style?: CSSProperties;
 }): react_jsx_runtime.JSX.Element;
-declare const BottomSheet: typeof BottomSheetInner & {
+declare const BottomSheet: react.ForwardRefExoticComponent<BottomSheetProps & react.RefAttributes<BottomSheetHandle>> & {
     Header: typeof Header;
 };
 
-export { BottomSheet, type BottomSheetProps };
+export { BottomSheet, type BottomSheetHandle, type BottomSheetProps };
