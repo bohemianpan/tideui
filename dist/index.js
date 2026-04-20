@@ -62,7 +62,7 @@ function injectStyles() {
   document.head.appendChild(style);
 }
 var HeaderRefContext = (0, import_react.createContext)(null);
-function BottomSheetInner({
+var BottomSheetInner = (0, import_react.forwardRef)(function BottomSheetInner2({
   isOpen,
   onClose,
   children,
@@ -74,7 +74,7 @@ function BottomSheetInner({
   snapPoints: snapPointsProp,
   defaultSnapPoint = 0,
   onSnap
-}) {
+}, ref) {
   (0, import_react.useEffect)(() => {
     injectStyles();
   }, []);
@@ -146,8 +146,10 @@ function BottomSheetInner({
   const [translateY, setTranslateY] = (0, import_react.useState)(0);
   const [isDragging, setIsDragging] = (0, import_react.useState)(false);
   const [isSnapping, setIsSnapping] = (0, import_react.useState)(false);
+  const [disableTransition, setDisableTransition] = (0, import_react.useState)(false);
   const sheetRef = (0, import_react.useRef)(null);
   const headerElRef = (0, import_react.useRef)(null);
+  const pillButtonRef = (0, import_react.useRef)(null);
   const dragStartY = (0, import_react.useRef)(0);
   const dragStartTime = (0, import_react.useRef)(0);
   const dragStartHeightPx = (0, import_react.useRef)(0);
@@ -164,6 +166,48 @@ function BottomSheetInner({
   const setHeaderEl = (0, import_react.useCallback)((el) => {
     headerElRef.current = el;
   }, []);
+  const settleAndFireSnap = (0, import_react.useCallback)((finalIndex) => {
+    const sheet = sheetRef.current;
+    if (!sheet) return;
+    const onTransitionDone = (e) => {
+      if (e.target !== sheet) return;
+      if (e.propertyName !== "height") return;
+      sheet.removeEventListener("transitionend", onTransitionDone);
+      setIsSnapping(false);
+      onSnapRef.current?.(finalIndex, sortedSnaps[finalIndex]);
+    };
+    sheet.addEventListener("transitionend", onTransitionDone);
+  }, [sortedSnaps]);
+  (0, import_react.useImperativeHandle)(ref, () => ({
+    snapTo(index, opts) {
+      if (!hasSnap || !snapHeightsPx || !sortedSnaps) return;
+      if (!mounted || isClosing) return;
+      const maxIdx = snapHeightsPx.length - 1;
+      const finalIndex = Math.max(0, Math.min(maxIdx, index));
+      const targetHeight = snapHeightsPx[finalIndex];
+      if (finalIndex === currentSnapIndexRef.current && sheetHeightPxRef.current === targetHeight) {
+        return;
+      }
+      const animate = opts?.animate !== false;
+      currentSnapIndexRef.current = finalIndex;
+      setCurrentSnapIndex(finalIndex);
+      sheetHeightPxRef.current = targetHeight;
+      if (animate) {
+        setIsSnapping(true);
+        setSheetHeightPx(targetHeight);
+        settleAndFireSnap(finalIndex);
+      } else {
+        setDisableTransition(true);
+        setSheetHeightPx(targetHeight);
+        onSnapRef.current?.(finalIndex, sortedSnaps[finalIndex]);
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            setDisableTransition(false);
+          });
+        });
+      }
+    }
+  }), [hasSnap, snapHeightsPx, sortedSnaps, mounted, isClosing, settleAndFireSnap]);
   (0, import_react.useEffect)(() => {
     if (!mounted || isClosing) return;
     const handleEscape = (e) => {
@@ -219,6 +263,10 @@ function BottomSheetInner({
     const target = swipeTarget === "header" ? headerElRef.current?.parentElement ?? sheetRef.current : sheetRef.current;
     if (!target) return;
     const handleTouchStart = (e) => {
+      if (pillButtonRef.current && e.target instanceof Node && pillButtonRef.current.contains(e.target)) {
+        isDragAllowed.current = false;
+        return;
+      }
       if (swipeTarget === "sheet" && !shouldAllowDrag(e.target)) {
         isDragAllowed.current = false;
         return;
@@ -301,17 +349,7 @@ function BottomSheetInner({
         setCurrentSnapIndex(finalIndex);
         sheetHeightPxRef.current = targetHeight;
         setSheetHeightPx(targetHeight);
-        const sheet = sheetRef.current;
-        if (sheet) {
-          const onTransitionDone = (e) => {
-            if (e.target !== sheet) return;
-            if (e.propertyName !== "height") return;
-            sheet.removeEventListener("transitionend", onTransitionDone);
-            setIsSnapping(false);
-            onSnapRef.current?.(finalIndex, sortedSnaps[finalIndex]);
-          };
-          sheet.addEventListener("transitionend", onTransitionDone);
-        }
+        settleAndFireSnap(finalIndex);
       } else {
         if (translateYRef.current > 0) {
           const duration = Date.now() - dragStartTime.current;
@@ -336,7 +374,7 @@ function BottomSheetInner({
       target.removeEventListener("touchend", handleTouchEnd);
       target.removeEventListener("touchcancel", handleTouchEnd);
     };
-  }, [mounted, isClosing, swipeTarget, shouldAllowDrag, hasSnap, snapHeightsPx, sortedSnaps]);
+  }, [mounted, isClosing, swipeTarget, shouldAllowDrag, hasSnap, snapHeightsPx, sortedSnaps, settleAndFireSnap]);
   if (!mounted) return null;
   const backdropOpacity = isClosing ? void 0 : hasSnap && snapHeightsPx ? Math.min(0.4, sheetHeightPx / snapHeightsPx[snapHeightsPx.length - 1] * 0.4) : Math.max(0, 1 - translateY / 300);
   const rootStyle = {
@@ -363,7 +401,7 @@ function BottomSheetInner({
     const heightValue = isClosing ? "0px" : `${sheetHeightPx}px`;
     sheetSizeAndMotion = {
       height: heightValue,
-      transition: isDragging ? "none" : isClosing ? `height ${EXIT_DURATION}ms ease-out` : `height ${SNAP_SPRING_DURATION}ms ${SNAP_SPRING_EASING}`,
+      transition: isDragging || disableTransition ? "none" : isClosing ? `height ${EXIT_DURATION}ms ease-out` : `height ${SNAP_SPRING_DURATION}ms ${SNAP_SPRING_EASING}`,
       touchAction: "none"
     };
   } else {
@@ -406,6 +444,27 @@ function BottomSheetInner({
     borderRadius: 9999,
     margin: "0 auto"
   };
+  const handlePillButtonStyle = {
+    ...handlePillStyle,
+    display: "block",
+    border: "none",
+    padding: 0,
+    background: handlePillStyle.backgroundColor,
+    cursor: "pointer"
+  };
+  const advanceSnap = () => {
+    if (!hasSnap || !snapHeightsPx) return;
+    const maxIdx = snapHeightsPx.length - 1;
+    const next = Math.min(currentSnapIndexRef.current + 1, maxIdx);
+    if (next === currentSnapIndexRef.current) return;
+    const targetHeight = snapHeightsPx[next];
+    setIsSnapping(true);
+    currentSnapIndexRef.current = next;
+    setCurrentSnapIndex(next);
+    sheetHeightPxRef.current = targetHeight;
+    setSheetHeightPx(targetHeight);
+    settleAndFireSnap(next);
+  };
   const safeAreaStyle = { flexShrink: 0, paddingBottom: "env(safe-area-inset-bottom, 0px)" };
   return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { style: rootStyle, children: [
     /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: backdropStyle, onClick: onClose }),
@@ -417,14 +476,23 @@ function BottomSheetInner({
         style: sheetStyle,
         onAnimationEnd: handleAnimationEnd,
         children: [
-          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: handleWrapperStyle, children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: handlePillStyle }) }),
+          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: handleWrapperStyle, children: hasSnap ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+            "button",
+            {
+              ref: pillButtonRef,
+              type: "button",
+              "aria-label": "Expand sheet",
+              onClick: advanceSnap,
+              style: handlePillButtonStyle
+            }
+          ) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: handlePillStyle }) }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)(HeaderRefContext.Provider, { value: setHeaderEl, children }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: safeAreaStyle })
         ]
       }
     )
   ] });
-}
+});
 function Header({ children, className, style }) {
   const setRef = (0, import_react.useContext)(HeaderRefContext);
   const ref = (0, import_react.useRef)(null);
