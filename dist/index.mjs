@@ -3,6 +3,7 @@ import {
   forwardRef,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -19,6 +20,19 @@ var SNAP_SPRING_DURATION = 300;
 var EXIT_DURATION = 300;
 var FLICK_VELOCITY = 0.3;
 var DISMISS_OVERSHOOT = 60;
+function resolveSettledIdx(targetHeight, effective) {
+  for (let i = 0; i < effective.length; i++) {
+    if (effective[i] >= targetHeight - 0.5) return i;
+  }
+  return effective.length - 1;
+}
+function nextDistinctIdx(fromIdx, effective) {
+  const current = effective[fromIdx];
+  for (let i = fromIdx + 1; i < effective.length; i++) {
+    if (effective[i] > current + 0.5) return i;
+  }
+  return fromIdx;
+}
 var STYLE_ID = "tideui-bottomsheet";
 function injectStyles() {
   if (typeof document === "undefined") return;
@@ -80,6 +94,14 @@ var BottomSheetInner = forwardRef(function BottomSheetInner2({
     () => hasSnap && sortedSnaps ? sortedSnaps.map((f) => f * viewportHeight) : null,
     [hasSnap, sortedSnaps, viewportHeight]
   );
+  const [contentRequiredPx, setContentRequiredPx] = useState(null);
+  const effectiveSnapHeightsPx = useMemo(() => {
+    if (!snapHeightsPx) return null;
+    if (contentRequiredPx == null || contentRequiredPx <= 0) return snapHeightsPx;
+    return snapHeightsPx.map((h) => Math.min(h, contentRequiredPx));
+  }, [snapHeightsPx, contentRequiredPx]);
+  const effectiveSnapHeightsPxRef = useRef(null);
+  effectiveSnapHeightsPxRef.current = effectiveSnapHeightsPx;
   const [mounted, setMounted] = useState(false);
   const [isClosing, setIsClosing] = useState(false);
   const [hasEntered, setHasEntered] = useState(false);
@@ -118,11 +140,15 @@ var BottomSheetInner = forwardRef(function BottomSheetInner2({
   sheetHeightPxRef.current = sheetHeightPx;
   useEffect(() => {
     if (!hasSnap || !snapHeightsPx) return;
+    const eff = effectiveSnapHeightsPxRef.current ?? snapHeightsPx;
     if (isOpen) {
-      const idx = Math.max(0, Math.min(defaultSnapPoint, snapHeightsPx.length - 1));
-      currentSnapIndexRef.current = idx;
-      setCurrentSnapIndex(idx);
-      setSheetHeightPx(snapHeightsPx[idx]);
+      const rawIdx = Math.max(0, Math.min(defaultSnapPoint, eff.length - 1));
+      const targetH = eff[rawIdx];
+      const settled = resolveSettledIdx(targetH, eff);
+      currentSnapIndexRef.current = settled;
+      setCurrentSnapIndex(settled);
+      sheetHeightPxRef.current = targetH;
+      setSheetHeightPx(targetH);
     } else if (mounted) {
       setSheetHeightPx(0);
     }
@@ -130,6 +156,10 @@ var BottomSheetInner = forwardRef(function BottomSheetInner2({
   const [translateY, setTranslateY] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const [isSnapping, setIsSnapping] = useState(false);
+  const isDraggingRef = useRef(false);
+  isDraggingRef.current = isDragging;
+  const isSnappingRef = useRef(false);
+  isSnappingRef.current = isSnapping;
   const [disableTransition, setDisableTransition] = useState(false);
   const sheetRef = useRef(null);
   const headerElRef = useRef(null);
@@ -150,6 +180,76 @@ var BottomSheetInner = forwardRef(function BottomSheetInner2({
   const setHeaderEl = useCallback((el) => {
     headerElRef.current = el;
   }, []);
+  const measureContent = useCallback(() => {
+    if (!hasSnap) return;
+    const sheet = sheetRef.current;
+    if (!sheet) return;
+    if (isDraggingRef.current || isSnappingRef.current) return;
+    for (let i = 0; i < sheet.children.length; i++) {
+      const child = sheet.children[i];
+      const cs = getComputedStyle(child);
+      if (parseFloat(cs.flexGrow || "0") > 0) {
+        setContentRequiredPx((prev) => prev == null ? prev : null);
+        return;
+      }
+    }
+    const savedHeight = sheet.style.height;
+    const savedTransition = sheet.style.transition;
+    sheet.style.transition = "none";
+    sheet.style.height = "auto";
+    const natural = sheet.offsetHeight;
+    sheet.style.height = savedHeight;
+    sheet.style.transition = savedTransition;
+    setContentRequiredPx(
+      (prev) => prev != null && Math.abs(prev - natural) < 0.5 ? prev : natural
+    );
+  }, [hasSnap]);
+  useLayoutEffect(() => {
+    if (!mounted || isClosing || !hasSnap) return;
+    if (isDragging || isSnapping) return;
+    measureContent();
+  }, [mounted, isClosing, hasSnap, isDragging, isSnapping, children, snapHeightsPx, viewportHeight, measureContent]);
+  useEffect(() => {
+    if (!mounted || !hasSnap) return;
+    const sheet = sheetRef.current;
+    if (!sheet || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => measureContent());
+    const observed = /* @__PURE__ */ new WeakSet();
+    const observeAll = () => {
+      for (let i = 0; i < sheet.children.length; i++) {
+        const child = sheet.children[i];
+        if (!observed.has(child)) {
+          ro.observe(child);
+          observed.add(child);
+        }
+      }
+    };
+    observeAll();
+    const mo = new MutationObserver(() => {
+      observeAll();
+      measureContent();
+    });
+    mo.observe(sheet, { childList: true });
+    return () => {
+      ro.disconnect();
+      mo.disconnect();
+    };
+  }, [mounted, hasSnap, measureContent]);
+  useLayoutEffect(() => {
+    if (!hasSnap || !effectiveSnapHeightsPx || !mounted || isClosing || !isOpen) return;
+    if (isDragging || isSnapping) return;
+    if (sheetHeightPxRef.current <= 0.5) return;
+    const idx = Math.min(currentSnapIndexRef.current, effectiveSnapHeightsPx.length - 1);
+    const newHeight = effectiveSnapHeightsPx[idx];
+    if (Math.abs(newHeight - sheetHeightPxRef.current) < 0.5) return;
+    setDisableTransition(true);
+    sheetHeightPxRef.current = newHeight;
+    setSheetHeightPx(newHeight);
+    const raf = requestAnimationFrame(() => {
+      requestAnimationFrame(() => setDisableTransition(false));
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [effectiveSnapHeightsPx, hasSnap, mounted, isClosing, isOpen, isDragging, isSnapping]);
   const settleAndFireSnap = useCallback((finalIndex) => {
     const sheet = sheetRef.current;
     if (!sheet) return;
@@ -166,17 +266,20 @@ var BottomSheetInner = forwardRef(function BottomSheetInner2({
     snapTo(index, opts) {
       if (!hasSnap || !snapHeightsPx || !sortedSnaps) return;
       if (!mounted || isClosing) return;
-      const maxIdx = snapHeightsPx.length - 1;
-      const finalIndex = Math.max(0, Math.min(maxIdx, index));
-      const targetHeight = snapHeightsPx[finalIndex];
-      if (finalIndex === currentSnapIndexRef.current && sheetHeightPxRef.current === targetHeight) {
+      const eff = effectiveSnapHeightsPxRef.current ?? snapHeightsPx;
+      const maxIdx = eff.length - 1;
+      const requestedIdx = Math.max(0, Math.min(maxIdx, index));
+      const targetHeight = eff[requestedIdx];
+      const finalIndex = resolveSettledIdx(targetHeight, eff);
+      if (finalIndex === currentSnapIndexRef.current && Math.abs(sheetHeightPxRef.current - targetHeight) < 0.5) {
         return;
       }
       const animate = opts?.animate !== false;
+      const heightUnchanged = Math.abs(sheetHeightPxRef.current - targetHeight) < 0.5;
       currentSnapIndexRef.current = finalIndex;
       setCurrentSnapIndex(finalIndex);
       sheetHeightPxRef.current = targetHeight;
-      if (animate) {
+      if (animate && !heightUnchanged) {
         setIsSnapping(true);
         setSheetHeightPx(targetHeight);
         settleAndFireSnap(finalIndex);
@@ -275,8 +378,10 @@ var BottomSheetInner = forwardRef(function BottomSheetInner2({
       if (dt > 0) frameVelocity.current = (lastFrameY.current - y) / dt;
       lastFrameY.current = y;
       lastFrameTime.current = now;
-      if (hasSnap && snapHeightsPx) {
-        const maxHeight = snapHeightsPx[snapHeightsPx.length - 1];
+      if (hasSnap) {
+        const eff = effectiveSnapHeightsPxRef.current ?? snapHeightsPx;
+        if (!eff) return;
+        const maxHeight = eff[eff.length - 1];
         const newHeight = Math.max(0, Math.min(maxHeight, dragStartHeightPx.current - diff));
         e.preventDefault();
         sheetHeightPxRef.current = newHeight;
@@ -293,8 +398,13 @@ var BottomSheetInner = forwardRef(function BottomSheetInner2({
     const handleTouchEnd = () => {
       setIsDragging(false);
       const v = frameVelocity.current;
-      if (hasSnap && snapHeightsPx) {
-        const minHeight = snapHeightsPx[0];
+      if (hasSnap) {
+        const eff = effectiveSnapHeightsPxRef.current ?? snapHeightsPx;
+        if (!eff) {
+          isDragAllowed.current = false;
+          return;
+        }
+        const minHeight = eff[0];
         const currentH = sheetHeightPxRef.current;
         if (currentH < minHeight - DISMISS_THRESHOLD) {
           onCloseRef.current();
@@ -308,17 +418,34 @@ var BottomSheetInner = forwardRef(function BottomSheetInner2({
         }
         let targetIndex;
         if (v > FLICK_VELOCITY) {
-          const idx = snapHeightsPx.findIndex((h) => h > currentH + 1);
-          targetIndex = idx === -1 ? snapHeightsPx.length - 1 : idx;
+          const idx = eff.findIndex((h) => h > currentH + 0.5);
+          if (idx !== -1) {
+            targetIndex = idx;
+          } else {
+            let best = 0, bestDist = Infinity;
+            for (let i = 0; i < eff.length; i++) {
+              const d = Math.abs(eff[i] - currentH);
+              if (d < bestDist) {
+                bestDist = d;
+                best = i;
+              }
+            }
+            targetIndex = best;
+          }
         } else if (v < -FLICK_VELOCITY) {
-          const reversed = [...snapHeightsPx].reverse();
-          const idx = reversed.findIndex((h) => h < currentH - 1);
-          targetIndex = idx === -1 ? 0 : snapHeightsPx.length - 1 - idx;
+          let idx = -1;
+          for (let i = eff.length - 1; i >= 0; i--) {
+            if (eff[i] < currentH - 0.5) {
+              idx = i;
+              break;
+            }
+          }
+          targetIndex = idx === -1 ? 0 : idx;
         } else {
           let best = 0;
           let bestDist = Infinity;
-          for (let i = 0; i < snapHeightsPx.length; i++) {
-            const d = Math.abs(snapHeightsPx[i] - currentH);
+          for (let i = 0; i < eff.length; i++) {
+            const d = Math.abs(eff[i] - currentH);
             if (d < bestDist) {
               bestDist = d;
               best = i;
@@ -326,14 +453,24 @@ var BottomSheetInner = forwardRef(function BottomSheetInner2({
           }
           targetIndex = best;
         }
-        const targetHeight = snapHeightsPx[targetIndex];
-        const finalIndex = targetIndex;
-        setIsSnapping(true);
+        const targetHeight = eff[targetIndex];
+        const finalIndex = resolveSettledIdx(targetHeight, eff);
+        const heightUnchanged = Math.abs(sheetHeightPxRef.current - targetHeight) < 0.5;
         currentSnapIndexRef.current = finalIndex;
         setCurrentSnapIndex(finalIndex);
         sheetHeightPxRef.current = targetHeight;
-        setSheetHeightPx(targetHeight);
-        settleAndFireSnap(finalIndex);
+        if (heightUnchanged) {
+          setDisableTransition(true);
+          setSheetHeightPx(targetHeight);
+          onSnapRef.current?.(finalIndex, sortedSnaps[finalIndex]);
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => setDisableTransition(false));
+          });
+        } else {
+          setIsSnapping(true);
+          setSheetHeightPx(targetHeight);
+          settleAndFireSnap(finalIndex);
+        }
       } else {
         if (translateYRef.current > 0) {
           const duration = Date.now() - dragStartTime.current;
@@ -360,7 +497,8 @@ var BottomSheetInner = forwardRef(function BottomSheetInner2({
     };
   }, [mounted, isClosing, swipeTarget, shouldAllowDrag, hasSnap, snapHeightsPx, sortedSnaps, settleAndFireSnap]);
   if (!mounted) return null;
-  const backdropOpacity = isClosing ? void 0 : hasSnap && snapHeightsPx ? Math.min(0.4, sheetHeightPx / snapHeightsPx[snapHeightsPx.length - 1] * 0.4) : Math.max(0, 1 - translateY / 300);
+  const effectiveMax = effectiveSnapHeightsPx && effectiveSnapHeightsPx.length > 0 ? effectiveSnapHeightsPx[effectiveSnapHeightsPx.length - 1] : snapHeightsPx ? snapHeightsPx[snapHeightsPx.length - 1] : 0;
+  const backdropOpacity = isClosing ? void 0 : hasSnap && snapHeightsPx ? Math.min(0.4, sheetHeightPx / Math.max(1, effectiveMax) * 0.4) : Math.max(0, 1 - translateY / 300);
   const rootStyle = {
     position: "fixed",
     top: 0,
@@ -437,11 +575,13 @@ var BottomSheetInner = forwardRef(function BottomSheetInner2({
     cursor: "pointer"
   };
   const advanceSnap = () => {
-    if (!hasSnap || !snapHeightsPx) return;
-    const maxIdx = snapHeightsPx.length - 1;
-    const next = Math.min(currentSnapIndexRef.current + 1, maxIdx);
-    if (next === currentSnapIndexRef.current) return;
-    const targetHeight = snapHeightsPx[next];
+    if (!hasSnap) return;
+    const eff = effectiveSnapHeightsPxRef.current ?? snapHeightsPx;
+    if (!eff) return;
+    const fromIdx = currentSnapIndexRef.current;
+    const next = nextDistinctIdx(fromIdx, eff);
+    if (next === fromIdx) return;
+    const targetHeight = eff[next];
     setIsSnapping(true);
     currentSnapIndexRef.current = next;
     setCurrentSnapIndex(next);

@@ -41,6 +41,13 @@ interface BottomSheetHandle {
      *  was not provided, or when the resolved target already matches the current
      *  snap. Out-of-range indices are clamped to `[0, snapPoints.length - 1]`.
      *
+     *  The target height is also clamped to the sheet's content-fit ceiling:
+     *  if `snapPoints[index]` is taller than the current content needs, the
+     *  sheet settles at the content-fit height instead, and `onSnap` fires
+     *  with the lowest-index snap that matches that height. Consumers tracking
+     *  snap position via `onSnap` will therefore observe fewer distinct indices
+     *  when the sheet's content is short.
+     *
      *  @param index  Target snap index (clamped).
      *  @param opts   `animate: false` moves instantly without the spring.
      *                `onSnap` still fires. Default: animated. */
