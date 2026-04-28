@@ -203,6 +203,7 @@ var BottomSheetInner = forwardRef(function BottomSheetInner2({
       const child = sheet.children[i];
       const cs = getComputedStyle(child);
       if (parseFloat(cs.flexGrow || "0") > 0) {
+        effectiveSnapHeightsPxRef.current = snapHeightsPx ?? null;
         setContentRequiredPx((prev) => prev == null ? prev : null);
         return;
       }
@@ -214,10 +215,13 @@ var BottomSheetInner = forwardRef(function BottomSheetInner2({
     const natural = sheet.offsetHeight;
     sheet.style.height = savedHeight;
     sheet.style.transition = savedTransition;
+    if (snapHeightsPx) {
+      effectiveSnapHeightsPxRef.current = snapHeightsPx.map((h) => Math.min(h, natural));
+    }
     setContentRequiredPx(
       (prev) => prev != null && Math.abs(prev - natural) < 0.5 ? prev : natural
     );
-  }, [hasSnap]);
+  }, [hasSnap, snapHeightsPx]);
   useLayoutEffect(() => {
     if (!mounted || isClosing || !hasSnap) return;
     if (isDragging || isSnapping) return;
@@ -389,6 +393,7 @@ var BottomSheetInner = forwardRef(function BottomSheetInner2({
         isDragPending.current = false;
         return;
       }
+      if (hasSnap) measureContent();
       const y = e.touches[0].clientY;
       dragStartY.current = y;
       dragStartTime.current = Date.now();

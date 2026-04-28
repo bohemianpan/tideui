@@ -379,6 +379,9 @@ const BottomSheetInner = forwardRef<BottomSheetHandle, BottomSheetProps>(functio
       const child = sheet.children[i] as HTMLElement;
       const cs = getComputedStyle(child);
       if (parseFloat(cs.flexGrow || '0') > 0) {
+        // Sync ref alongside the state update so synchronous readers (touch
+        // handlers) see the unclamped heights immediately, not on next render.
+        effectiveSnapHeightsPxRef.current = snapHeightsPx ?? null;
         setContentRequiredPx(prev => (prev == null ? prev : null));
         return;
       }
@@ -396,10 +399,17 @@ const BottomSheetInner = forwardRef<BottomSheetHandle, BottomSheetProps>(functio
     sheet.style.height = savedHeight;
     sheet.style.transition = savedTransition;
 
+    // Sync ref so a touchstart-triggered measure makes the new effective
+    // heights visible to handleTouchMove on the same gesture (state-driven
+    // re-render is async and would otherwise leave the touchmove clamping
+    // against the previous content's max).
+    if (snapHeightsPx) {
+      effectiveSnapHeightsPxRef.current = snapHeightsPx.map(h => Math.min(h, natural));
+    }
     setContentRequiredPx(prev =>
       (prev != null && Math.abs(prev - natural) < 0.5) ? prev : natural,
     );
-  }, [hasSnap]);
+  }, [hasSnap, snapHeightsPx]);
 
   // Re-measure after every commit when content-relevant inputs change.
   // Runs before paint so the first frame reflects the clamped height when
@@ -673,6 +683,14 @@ const BottomSheetInner = forwardRef<BottomSheetHandle, BottomSheetProps>(functio
         isDragPending.current = false;
         return;
       }
+      // Re-measure synchronously so touchmove clamps against the current
+      // content size. The ResizeObserver re-measure runs asynchronously, so
+      // a touch immediately after a content swap (e.g. a tab change that
+      // exposes much taller content) would otherwise drag against the old
+      // effective max for one full gesture before settling correctly on
+      // touchend.
+      if (hasSnap) measureContent();
+
       const y = e.touches[0].clientY;
       dragStartY.current = y;
       dragStartTime.current = Date.now();
