@@ -35,6 +35,7 @@ var SNAP_SPRING_DURATION = 300;
 var EXIT_DURATION = 300;
 var FLICK_VELOCITY = 0.3;
 var DISMISS_OVERSHOOT = 60;
+var INTENT_THRESHOLD = 5;
 function resolveSettledIdx(targetHeight, effective) {
   for (let i = 0; i < effective.length; i++) {
     if (effective[i] >= targetHeight - 0.5) return i;
@@ -347,19 +348,39 @@ var BottomSheetInner = (0, import_react.forwardRef)(function BottomSheetInner2({
     sheet.addEventListener("scroll", handleScroll, { passive: true, capture: true });
     return () => sheet.removeEventListener("scroll", handleScroll, { capture: true });
   }, [mounted, isClosing, swipeTarget]);
-  const shouldAllowDrag = (0, import_react.useCallback)((target) => {
-    if (translateYRef.current > 0) return true;
-    if (swipeTarget === "header") return true;
-    if (Date.now() - lastScrollTime.current < SCROLL_LOCK_TIMEOUT) return false;
-    let element = target;
-    while (element && element !== sheetRef.current) {
-      if (element.scrollHeight > element.clientHeight && element.scrollTop > 0) {
-        return false;
+  const decideGestureIntent = (0, import_react.useCallback)(
+    (target, direction) => {
+      if (translateYRef.current > 0) return "drag";
+      if (swipeTarget === "header") return "drag";
+      if (Date.now() - lastScrollTime.current < SCROLL_LOCK_TIMEOUT) return "scroll";
+      let element = target;
+      let scroller = null;
+      while (element && element !== sheetRef.current) {
+        if (element.scrollHeight > element.clientHeight + 0.5) {
+          scroller = element;
+          break;
+        }
+        element = element.parentElement;
       }
-      element = element.parentElement;
-    }
-    return true;
-  }, [swipeTarget]);
+      if (direction === "down") {
+        if (scroller && scroller.scrollTop > 0) return "scroll";
+        return "drag";
+      }
+      if (!scroller) return "drag";
+      const moreBelow = scroller.scrollTop + scroller.clientHeight < scroller.scrollHeight - 0.5;
+      if (!moreBelow) return "drag";
+      if (hasSnap) {
+        const eff = effectiveSnapHeightsPxRef.current ?? snapHeightsPx;
+        if (!eff || eff.length === 0) return "scroll";
+        const maxH = eff[eff.length - 1];
+        if (sheetHeightPxRef.current >= maxH - 0.5) return "scroll";
+        return "drag";
+      }
+      return "scroll";
+    },
+    [swipeTarget, hasSnap, snapHeightsPx]
+  );
+  const isDragPending = (0, import_react.useRef)(false);
   (0, import_react.useEffect)(() => {
     if (!mounted || isClosing) return;
     const target = swipeTarget === "header" ? headerElRef.current?.parentElement ?? sheetRef.current : sheetRef.current;
@@ -367,10 +388,7 @@ var BottomSheetInner = (0, import_react.forwardRef)(function BottomSheetInner2({
     const handleTouchStart = (e) => {
       if (pillButtonRef.current && e.target instanceof Node && pillButtonRef.current.contains(e.target)) {
         isDragAllowed.current = false;
-        return;
-      }
-      if (swipeTarget === "sheet" && !shouldAllowDrag(e.target)) {
-        isDragAllowed.current = false;
+        isDragPending.current = false;
         return;
       }
       const y = e.touches[0].clientY;
@@ -380,12 +398,17 @@ var BottomSheetInner = (0, import_react.forwardRef)(function BottomSheetInner2({
       lastFrameY.current = y;
       lastFrameTime.current = Date.now();
       frameVelocity.current = 0;
-      isDragAllowed.current = swipeTarget === "header" ? true : shouldAllowDrag(e.target);
-      setIsDragging(true);
-      setIsSnapping(false);
+      if (swipeTarget === "header") {
+        isDragAllowed.current = true;
+        isDragPending.current = false;
+        setIsDragging(true);
+        setIsSnapping(false);
+        return;
+      }
+      isDragAllowed.current = false;
+      isDragPending.current = true;
     };
     const handleTouchMove = (e) => {
-      if (!isDragAllowed.current) return;
       const y = e.touches[0].clientY;
       const diff = y - dragStartY.current;
       const now = Date.now();
@@ -393,6 +416,19 @@ var BottomSheetInner = (0, import_react.forwardRef)(function BottomSheetInner2({
       if (dt > 0) frameVelocity.current = (lastFrameY.current - y) / dt;
       lastFrameY.current = y;
       lastFrameTime.current = now;
+      if (isDragPending.current) {
+        if (Math.abs(diff) < INTENT_THRESHOLD) return;
+        const intent = decideGestureIntent(e.target, diff < 0 ? "up" : "down");
+        isDragPending.current = false;
+        if (intent === "scroll") {
+          isDragAllowed.current = false;
+          return;
+        }
+        isDragAllowed.current = true;
+        setIsDragging(true);
+        setIsSnapping(false);
+      }
+      if (!isDragAllowed.current) return;
       if (hasSnap) {
         const eff = effectiveSnapHeightsPxRef.current ?? snapHeightsPx;
         if (!eff) return;
@@ -403,8 +439,6 @@ var BottomSheetInner = (0, import_react.forwardRef)(function BottomSheetInner2({
         setSheetHeightPx(newHeight);
       } else {
         if (diff <= 0) return;
-        if (!isDragAllowed.current && !shouldAllowDrag(e.target)) return;
-        isDragAllowed.current = true;
         e.preventDefault();
         translateYRef.current = diff;
         setTranslateY(diff);
@@ -413,6 +447,10 @@ var BottomSheetInner = (0, import_react.forwardRef)(function BottomSheetInner2({
     const handleTouchEnd = () => {
       setIsDragging(false);
       const v = frameVelocity.current;
+      if (!isDragAllowed.current) {
+        isDragPending.current = false;
+        return;
+      }
       if (hasSnap) {
         const eff = effectiveSnapHeightsPxRef.current ?? snapHeightsPx;
         if (!eff) {
@@ -499,6 +537,7 @@ var BottomSheetInner = (0, import_react.forwardRef)(function BottomSheetInner2({
         }
       }
       isDragAllowed.current = false;
+      isDragPending.current = false;
     };
     target.addEventListener("touchstart", handleTouchStart, { passive: true });
     target.addEventListener("touchmove", handleTouchMove, { passive: false });
@@ -510,7 +549,7 @@ var BottomSheetInner = (0, import_react.forwardRef)(function BottomSheetInner2({
       target.removeEventListener("touchend", handleTouchEnd);
       target.removeEventListener("touchcancel", handleTouchEnd);
     };
-  }, [mounted, isClosing, swipeTarget, shouldAllowDrag, hasSnap, snapHeightsPx, sortedSnaps, settleAndFireSnap]);
+  }, [mounted, isClosing, swipeTarget, decideGestureIntent, hasSnap, snapHeightsPx, sortedSnaps, settleAndFireSnap]);
   if (!mounted) return null;
   const effectiveMax = effectiveSnapHeightsPx && effectiveSnapHeightsPx.length > 0 ? effectiveSnapHeightsPx[effectiveSnapHeightsPx.length - 1] : snapHeightsPx ? snapHeightsPx[snapHeightsPx.length - 1] : 0;
   const backdropOpacity = isClosing ? void 0 : hasSnap && snapHeightsPx ? Math.min(0.4, sheetHeightPx / Math.max(1, effectiveMax) * 0.4) : Math.max(0, 1 - translateY / 300);

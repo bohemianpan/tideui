@@ -27,6 +27,7 @@ const SNAP_SPRING_DURATION = 300; // ms
 const EXIT_DURATION = 300; // ms
 const FLICK_VELOCITY = 0.3; // px/ms, snap-mode flick threshold
 const DISMISS_OVERSHOOT = 60; // px below lowest snap required to close
+const INTENT_THRESHOLD = 5; // px, drag-vs-scroll decision threshold
 
 // ---------------------------------------------------------------------------
 // Snap index helpers (pure)
@@ -567,20 +568,63 @@ const BottomSheetInner = forwardRef<BottomSheetHandle, BottomSheetProps>(functio
     return () => sheet.removeEventListener('scroll', handleScroll, { capture: true });
   }, [mounted, isClosing, swipeTarget]);
 
-  const shouldAllowDrag = useCallback((target: EventTarget | null): boolean => {
-    if (translateYRef.current > 0) return true;
-    if (swipeTarget === 'header') return true;
-    if (Date.now() - lastScrollTime.current < SCROLL_LOCK_TIMEOUT) return false;
+  /** Decide whether a touch gesture should drag the sheet or let the inner
+   *  content scroll natively. Direction-aware so the user can pull the sheet
+   *  to a higher snap, scroll content when at the top snap, scroll up content
+   *  that's been scrolled, and pull the sheet down to dismiss when at the
+   *  scroll origin — all from the same gesture-start point.
+   *
+   *  `direction` is the user's finger direction: `'up'` (diff < 0, fingers
+   *  rising) or `'down'` (diff > 0, fingers falling). */
+  const decideGestureIntent = useCallback(
+    (target: EventTarget | null, direction: 'up' | 'down'): 'drag' | 'scroll' => {
+      if (translateYRef.current > 0) return 'drag';
+      if (swipeTarget === 'header') return 'drag';
+      if (Date.now() - lastScrollTime.current < SCROLL_LOCK_TIMEOUT) return 'scroll';
 
-    let element = target as HTMLElement | null;
-    while (element && element !== sheetRef.current) {
-      if (element.scrollHeight > element.clientHeight && element.scrollTop > 0) {
-        return false;
+      // Walk up looking for the first scrollable ancestor inside the sheet.
+      let element = target as HTMLElement | null;
+      let scroller: HTMLElement | null = null;
+      while (element && element !== sheetRef.current) {
+        if (element.scrollHeight > element.clientHeight + 0.5) {
+          scroller = element;
+          break;
+        }
+        element = element.parentElement;
       }
-      element = element.parentElement;
-    }
-    return true;
-  }, [swipeTarget]);
+
+      if (direction === 'down') {
+        // Finger moving down → content scrolls up. Scroll wins iff the
+        // scrollable has somewhere above to reveal; otherwise pull the sheet
+        // (toward dismiss, in non-snap mode; toward a lower snap otherwise).
+        if (scroller && scroller.scrollTop > 0) return 'scroll';
+        return 'drag';
+      }
+
+      // direction === 'up' → content scrolls down. Scroll wins iff the
+      // scrollable has more below AND, in snap mode, the sheet has already
+      // expanded to its tallest effective snap (so there's no more sheet
+      // growth to consume the gesture).
+      if (!scroller) return 'drag';
+      const moreBelow =
+        scroller.scrollTop + scroller.clientHeight < scroller.scrollHeight - 0.5;
+      if (!moreBelow) return 'drag';
+      if (hasSnap) {
+        const eff = effectiveSnapHeightsPxRef.current ?? snapHeightsPx;
+        if (!eff || eff.length === 0) return 'scroll';
+        const maxH = eff[eff.length - 1];
+        if (sheetHeightPxRef.current >= maxH - 0.5) return 'scroll';
+        return 'drag';
+      }
+      return 'scroll';
+    },
+    [swipeTarget, hasSnap, snapHeightsPx],
+  );
+
+  /** True between touchstart and the first touchmove that crosses
+   *  INTENT_THRESHOLD — during this window we have no direction and so haven't
+   *  yet decided whether the gesture drags the sheet or scrolls inner content. */
+  const isDragPending = useRef(false);
 
   // -----------------------------------------------------------------------
   // Touch event handlers
@@ -601,10 +645,7 @@ const BottomSheetInner = forwardRef<BottomSheetHandle, BottomSheetProps>(functio
         pillButtonRef.current.contains(e.target)
       ) {
         isDragAllowed.current = false;
-        return;
-      }
-      if (swipeTarget === 'sheet' && !shouldAllowDrag(e.target)) {
-        isDragAllowed.current = false;
+        isDragPending.current = false;
         return;
       }
       const y = e.touches[0].clientY;
@@ -614,22 +655,53 @@ const BottomSheetInner = forwardRef<BottomSheetHandle, BottomSheetProps>(functio
       lastFrameY.current = y;
       lastFrameTime.current = Date.now();
       frameVelocity.current = 0;
-      isDragAllowed.current = swipeTarget === 'header' ? true : shouldAllowDrag(e.target);
-      setIsDragging(true);
-      setIsSnapping(false);
+
+      if (swipeTarget === 'header') {
+        isDragAllowed.current = true;
+        isDragPending.current = false;
+        setIsDragging(true);
+        setIsSnapping(false);
+        return;
+      }
+
+      // Sheet mode: defer drag-vs-scroll decision to the first significant
+      // touchmove so direction can be observed. Marking the gesture pending
+      // (instead of committing isDragAllowed=true here) is what lets inner
+      // scrollables receive native scroll: until intent is decided we do not
+      // call preventDefault, so the browser can scroll on its own when the
+      // gesture turns out to be a content scroll.
+      isDragAllowed.current = false;
+      isDragPending.current = true;
     };
 
     const handleTouchMove = (e: TouchEvent) => {
-      if (!isDragAllowed.current) return;
       const y = e.touches[0].clientY;
       const diff = y - dragStartY.current;
 
-      // Update per-frame velocity (for flick detection)
+      // Velocity tracking has to run before the pending-intent gate so a flick
+      // gesture's initial frames still count toward release velocity.
       const now = Date.now();
       const dt = now - lastFrameTime.current;
       if (dt > 0) frameVelocity.current = (lastFrameY.current - y) / dt;
       lastFrameY.current = y;
       lastFrameTime.current = now;
+
+      if (isDragPending.current) {
+        if (Math.abs(diff) < INTENT_THRESHOLD) return;
+        const intent = decideGestureIntent(e.target, diff < 0 ? 'up' : 'down');
+        isDragPending.current = false;
+        if (intent === 'scroll') {
+          // Leave the touch to the browser. We never preventDefault on this
+          // gesture, so the inner scrollable scrolls natively from here on.
+          isDragAllowed.current = false;
+          return;
+        }
+        isDragAllowed.current = true;
+        setIsDragging(true);
+        setIsSnapping(false);
+      }
+
+      if (!isDragAllowed.current) return;
 
       if (hasSnap) {
         // Clamp to the content-aware effective maximum — prevents dragging
@@ -644,8 +716,6 @@ const BottomSheetInner = forwardRef<BottomSheetHandle, BottomSheetProps>(functio
       } else {
         // Non-snap: only drag down to dismiss
         if (diff <= 0) return;
-        if (!isDragAllowed.current && !shouldAllowDrag(e.target)) return;
-        isDragAllowed.current = true;
         e.preventDefault();
         translateYRef.current = diff;
         setTranslateY(diff);
@@ -655,6 +725,15 @@ const BottomSheetInner = forwardRef<BottomSheetHandle, BottomSheetProps>(functio
     const handleTouchEnd = () => {
       setIsDragging(false);
       const v = frameVelocity.current; // px/ms, positive = flicking up
+
+      // No-op when the gesture never committed to a drag (intent decided
+      // "scroll", or finger never moved past INTENT_THRESHOLD). Without this,
+      // a tap or content-scroll gesture would still fire a settle pass and
+      // emit a spurious `onSnap` for a position that didn't change.
+      if (!isDragAllowed.current) {
+        isDragPending.current = false;
+        return;
+      }
 
       if (hasSnap) {
         const eff = effectiveSnapHeightsPxRef.current ?? snapHeightsPx;
@@ -753,6 +832,7 @@ const BottomSheetInner = forwardRef<BottomSheetHandle, BottomSheetProps>(functio
       }
 
       isDragAllowed.current = false;
+      isDragPending.current = false;
     };
 
     target.addEventListener('touchstart', handleTouchStart, { passive: true });
@@ -766,7 +846,7 @@ const BottomSheetInner = forwardRef<BottomSheetHandle, BottomSheetProps>(functio
       target.removeEventListener('touchend', handleTouchEnd);
       target.removeEventListener('touchcancel', handleTouchEnd);
     };
-  }, [mounted, isClosing, swipeTarget, shouldAllowDrag, hasSnap, snapHeightsPx, sortedSnaps, settleAndFireSnap]);
+  }, [mounted, isClosing, swipeTarget, decideGestureIntent, hasSnap, snapHeightsPx, sortedSnaps, settleAndFireSnap]);
 
   if (!mounted) return null;
 
