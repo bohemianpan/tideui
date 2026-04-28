@@ -248,24 +248,37 @@ const BottomSheetInner = forwardRef<BottomSheetHandle, BottomSheetProps>(functio
   // more than once in quick succession (consumer-driven re-renders, ResizeObserver
   // callbacks during exit), the browser fires `transitioncancel` instead of
   // `transitionend` and the sheet would otherwise stay mounted forever.
+  // Hard timeout fallback (EXIT_DURATION + slack) covers the case where
+  // neither event fires — most commonly when the sheet was already at the
+  // close target value (e.g. swipe-to-dismiss dragged height to 0 before
+  // onClose ran, so the close-height write is a no-op transition).
   useEffect(() => {
     if (!isClosing) return;
     const sheet = sheetRef.current;
     if (!sheet) return;
     const targetProp = hasSnap ? 'height' : 'transform';
-    const onDone = (e: TransitionEvent) => {
-      if (e.target !== sheet) return;
-      if (e.propertyName !== targetProp) return;
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
       sheet.removeEventListener('transitionend', onDone);
       sheet.removeEventListener('transitioncancel', onDone);
+      clearTimeout(fallback);
       setMounted(false);
       setIsClosing(false);
     };
+    const onDone = (e: TransitionEvent) => {
+      if (e.target !== sheet) return;
+      if (e.propertyName !== targetProp) return;
+      finish();
+    };
     sheet.addEventListener('transitionend', onDone);
     sheet.addEventListener('transitioncancel', onDone);
+    const fallback = setTimeout(finish, EXIT_DURATION + 50);
     return () => {
       sheet.removeEventListener('transitionend', onDone);
       sheet.removeEventListener('transitioncancel', onDone);
+      clearTimeout(fallback);
     };
   }, [isClosing, hasSnap]);
 

@@ -139,19 +139,28 @@ var BottomSheetInner = (0, import_react.forwardRef)(function BottomSheetInner2({
     const sheet = sheetRef.current;
     if (!sheet) return;
     const targetProp = hasSnap ? "height" : "transform";
-    const onDone = (e) => {
-      if (e.target !== sheet) return;
-      if (e.propertyName !== targetProp) return;
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
       sheet.removeEventListener("transitionend", onDone);
       sheet.removeEventListener("transitioncancel", onDone);
+      clearTimeout(fallback);
       setMounted(false);
       setIsClosing(false);
     };
+    const onDone = (e) => {
+      if (e.target !== sheet) return;
+      if (e.propertyName !== targetProp) return;
+      finish();
+    };
     sheet.addEventListener("transitionend", onDone);
     sheet.addEventListener("transitioncancel", onDone);
+    const fallback = setTimeout(finish, EXIT_DURATION + 50);
     return () => {
       sheet.removeEventListener("transitionend", onDone);
       sheet.removeEventListener("transitioncancel", onDone);
+      clearTimeout(fallback);
     };
   }, [isClosing, hasSnap]);
   const [currentSnapIndex, setCurrentSnapIndex] = (0, import_react.useState)(defaultSnapPoint);
