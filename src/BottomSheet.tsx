@@ -960,6 +960,10 @@ const BottomSheetInner = forwardRef<BottomSheetHandle, BottomSheetProps>(functio
     display: 'block',
     border: 'none',
     padding: 0,
+    // Mobile Safari's UA stylesheet sets `min-height: 44px` on `<button>` for
+    // accessibility — without overriding it the grabber pill renders as a
+    // chunky 44px-tall block instead of the intended 4px hairline.
+    minHeight: 0,
     background: handlePillStyle.backgroundColor,
     cursor: 'pointer',
   };
