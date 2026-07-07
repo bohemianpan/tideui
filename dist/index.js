@@ -92,7 +92,8 @@ var BottomSheetInner = (0, import_react.forwardRef)(function BottomSheetInner2({
   zIndex = 2e3,
   snapPoints: snapPointsProp,
   defaultSnapPoint = 0,
-  onSnap
+  onSnap,
+  modal = true
 }, ref) {
   (0, import_react.useEffect)(() => {
     injectStyles();
@@ -583,7 +584,10 @@ var BottomSheetInner = (0, import_react.forwardRef)(function BottomSheetInner2({
     left: 0,
     right: 0,
     bottom: 0,
-    zIndex
+    zIndex,
+    // Non-modal sheets let pointer events fall through the full-screen root to
+    // whatever is behind (e.g. a map); the sheet itself re-enables them below.
+    ...modal ? null : { pointerEvents: "none" }
   };
   const backdropStyle = {
     position: "absolute",
@@ -634,6 +638,9 @@ var BottomSheetInner = (0, import_react.forwardRef)(function BottomSheetInner2({
     flexDirection: "column",
     boxShadow: "0 -10px 40px rgba(0,0,0,0.15)",
     overflow: "hidden",
+    // Re-enable pointer events on the sheet when the root disables them
+    // (non-modal) so the sheet stays draggable and its content clickable.
+    ...modal ? null : { pointerEvents: "auto" },
     ...sheetSizeAndMotion
   };
   const handleWrapperStyle = { flexShrink: 0, paddingTop: 8, paddingBottom: 4 };
@@ -673,7 +680,7 @@ var BottomSheetInner = (0, import_react.forwardRef)(function BottomSheetInner2({
   };
   const safeAreaStyle = { flexShrink: 0, paddingBottom: "env(safe-area-inset-bottom, 0px)" };
   return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { style: rootStyle, children: [
-    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: backdropStyle, onClick: onClose }),
+    modal && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: backdropStyle, onClick: onClose }),
     /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
       "div",
       {

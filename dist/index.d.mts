@@ -30,6 +30,19 @@ interface BottomSheetProps {
     defaultSnapPoint?: number;
     /** Called when the sheet settles at a snap point. */
     onSnap?: (index: number, snapValue: number) => void;
+    /** Whether the sheet is modal. Default: true.
+     *
+     *  When `true`, a full-screen backdrop sits behind the sheet: it dims the
+     *  content behind, captures pointer events (so the background can't be
+     *  interacted with), and tapping it closes the sheet.
+     *
+     *  When `false`, the sheet is non-modal: no backdrop is rendered, and the
+     *  full-screen root wrapper lets pointer events pass through to whatever is
+     *  behind it, so the background (e.g. a map) stays fully interactive — pan,
+     *  zoom, taps all keep working — while the sheet itself remains interactive.
+     *  Since there's no backdrop to tap, dismiss via drag-to-dismiss, the Escape
+     *  key, or your own close control. */
+    modal?: boolean;
 }
 /** Imperative handle exposed via `ref`. Obtain by typing your ref as
  *  `useRef<BottomSheetHandle>(null)` and passing it to `<BottomSheet ref={...} />`. */

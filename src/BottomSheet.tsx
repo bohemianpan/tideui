@@ -143,6 +143,19 @@ export interface BottomSheetProps {
   defaultSnapPoint?: number;
   /** Called when the sheet settles at a snap point. */
   onSnap?: (index: number, snapValue: number) => void;
+  /** Whether the sheet is modal. Default: true.
+   *
+   *  When `true`, a full-screen backdrop sits behind the sheet: it dims the
+   *  content behind, captures pointer events (so the background can't be
+   *  interacted with), and tapping it closes the sheet.
+   *
+   *  When `false`, the sheet is non-modal: no backdrop is rendered, and the
+   *  full-screen root wrapper lets pointer events pass through to whatever is
+   *  behind it, so the background (e.g. a map) stays fully interactive — pan,
+   *  zoom, taps all keep working — while the sheet itself remains interactive.
+   *  Since there's no backdrop to tap, dismiss via drag-to-dismiss, the Escape
+   *  key, or your own close control. */
+  modal?: boolean;
 }
 
 /** Imperative handle exposed via `ref`. Obtain by typing your ref as
@@ -194,6 +207,7 @@ const BottomSheetInner = forwardRef<BottomSheetHandle, BottomSheetProps>(functio
   snapPoints: snapPointsProp,
   defaultSnapPoint = 0,
   onSnap,
+  modal = true,
 }, ref) {
   useEffect(() => { injectStyles(); }, []);
 
@@ -933,6 +947,9 @@ const BottomSheetInner = forwardRef<BottomSheetHandle, BottomSheetProps>(functio
     right: 0,
     bottom: 0,
     zIndex,
+    // Non-modal sheets let pointer events fall through the full-screen root to
+    // whatever is behind (e.g. a map); the sheet itself re-enables them below.
+    ...(modal ? null : { pointerEvents: 'none' }),
   };
 
   const backdropStyle: CSSProperties = {
@@ -1001,6 +1018,9 @@ const BottomSheetInner = forwardRef<BottomSheetHandle, BottomSheetProps>(functio
     flexDirection: 'column',
     boxShadow: '0 -10px 40px rgba(0,0,0,0.15)',
     overflow: 'hidden',
+    // Re-enable pointer events on the sheet when the root disables them
+    // (non-modal) so the sheet stays draggable and its content clickable.
+    ...(modal ? null : { pointerEvents: 'auto' }),
     ...sheetSizeAndMotion,
   };
 
@@ -1051,7 +1071,7 @@ const BottomSheetInner = forwardRef<BottomSheetHandle, BottomSheetProps>(functio
 
   return (
     <div style={rootStyle}>
-      <div style={backdropStyle} onClick={onClose} />
+      {modal && <div style={backdropStyle} onClick={onClose} />}
       <div
         ref={sheetRef}
         className={className}
